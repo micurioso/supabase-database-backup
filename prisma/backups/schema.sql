@@ -182,6 +182,39 @@ $$;
 
 ALTER FUNCTION "public"."set_updated_at"() OWNER TO "postgres";
 
+
+CREATE OR REPLACE FUNCTION "public"."staff_directory_compose_name"() RETURNS "trigger"
+    LANGUAGE "plpgsql"
+    AS $$
+begin
+  new.name := regexp_replace(
+    btrim(
+      coalesce(new.first_name, '') || ' ' ||
+      coalesce(new.middle_name, '') || ' ' ||
+      coalesce(new.last_name, '')
+    ),
+    '\s+', ' ', 'g'
+  );
+  return new;
+end;
+$$;
+
+
+ALTER FUNCTION "public"."staff_directory_compose_name"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."staff_directory_touch_updated_at"() RETURNS "trigger"
+    LANGUAGE "plpgsql"
+    AS $$
+begin
+  new.updated_at = now();
+  return new;
+end;
+$$;
+
+
+ALTER FUNCTION "public"."staff_directory_touch_updated_at"() OWNER TO "postgres";
+
 SET default_tablespace = '';
 
 SET default_table_access_method = "heap";
@@ -390,6 +423,23 @@ CREATE TABLE IF NOT EXISTS "public"."staff" (
 ALTER TABLE "public"."staff" OWNER TO "postgres";
 
 
+CREATE TABLE IF NOT EXISTS "public"."staff_directory" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "name" "text" NOT NULL,
+    "municipality" "text" NOT NULL,
+    "position" "text",
+    "active" boolean DEFAULT true NOT NULL,
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "first_name" "text" NOT NULL,
+    "middle_name" "text",
+    "last_name" "text" NOT NULL
+);
+
+
+ALTER TABLE "public"."staff_directory" OWNER TO "postgres";
+
+
 CREATE TABLE IF NOT EXISTS "public"."staff_municipality" (
     "user_id" "uuid" NOT NULL,
     "municipality" "text" NOT NULL
@@ -574,6 +624,38 @@ COMMENT ON COLUMN "public"."swdi_score"."fa3" IS 'Awareness of disaster risk red
 
 
 
+CREATE OR REPLACE VIEW "public"."v_grantee_list" WITH ("security_invoker"='on') AS
+ SELECT "id",
+    "hh_id",
+    "grantee_name",
+    "municipality",
+    "barangay",
+    "status",
+    "target_tag",
+    "created_at",
+    "region",
+    "province",
+    "entry_id",
+    "set_group",
+    "birthday",
+    "sex",
+    "ip_affiliation",
+    "mothers_maiden_name",
+    "date_tagged_v2",
+    "date_tagged_v3",
+    "registered",
+    "l3_consolidated",
+    "assigned_cml",
+    "lhf",
+    (EXISTS ( SELECT 1
+           FROM "public"."case_list" "c"
+          WHERE (("c"."hh_id" = "g"."hh_id") AND ("c"."is_manual_entry" = false) AND ("c"."record_no" IS NOT NULL)))) AS "has_verified_record_no"
+   FROM "public"."grantee_list" "g";
+
+
+ALTER VIEW "public"."v_grantee_list" OWNER TO "postgres";
+
+
 ALTER TABLE ONLY "public"."case_list"
     ADD CONSTRAINT "case_list_pkey" PRIMARY KEY ("id");
 
@@ -619,6 +701,11 @@ ALTER TABLE ONLY "public"."municipality"
 
 
 
+ALTER TABLE ONLY "public"."staff_directory"
+    ADD CONSTRAINT "staff_directory_pkey" PRIMARY KEY ("id");
+
+
+
 ALTER TABLE ONLY "public"."staff_municipality"
     ADD CONSTRAINT "staff_municipality_pkey" PRIMARY KEY ("user_id", "municipality");
 
@@ -644,6 +731,10 @@ CREATE INDEX "case_list_approval_status_idx" ON "public"."case_list" USING "btre
 
 
 CREATE INDEX "case_list_hh_id_idx" ON "public"."case_list" USING "btree" ("hh_id");
+
+
+
+CREATE INDEX "case_list_hh_id_verified_idx" ON "public"."case_list" USING "btree" ("hh_id") WHERE (("is_manual_entry" = false) AND ("record_no" IS NOT NULL));
 
 
 
@@ -711,6 +802,14 @@ CREATE INDEX "grantee_transfer_hh_id_idx" ON "public"."grantee_transfer" USING "
 
 
 
+CREATE INDEX "staff_directory_municipality_idx" ON "public"."staff_directory" USING "btree" ("municipality");
+
+
+
+CREATE UNIQUE INDEX "staff_directory_name_muni_idx" ON "public"."staff_directory" USING "btree" ("lower"("name"), "municipality");
+
+
+
 CREATE INDEX "swdi_encoding_encoder_idx" ON "public"."swdi_encoding" USING "btree" ("encoder");
 
 
@@ -732,6 +831,14 @@ CREATE INDEX "swdi_score_hh_id_idx" ON "public"."swdi_score" USING "btree" ("hh_
 
 
 CREATE OR REPLACE TRIGGER "case_list_set_updated_at" BEFORE UPDATE ON "public"."case_list" FOR EACH ROW EXECUTE FUNCTION "public"."set_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "staff_directory_compose_name" BEFORE INSERT OR UPDATE OF "first_name", "middle_name", "last_name" ON "public"."staff_directory" FOR EACH ROW EXECUTE FUNCTION "public"."staff_directory_compose_name"();
+
+
+
+CREATE OR REPLACE TRIGGER "staff_directory_set_updated_at" BEFORE UPDATE ON "public"."staff_directory" FOR EACH ROW EXECUTE FUNCTION "public"."staff_directory_touch_updated_at"();
 
 
 
@@ -766,6 +873,11 @@ ALTER TABLE ONLY "public"."municipality"
 
 ALTER TABLE ONLY "public"."staff"
     ADD CONSTRAINT "staff_cluster_id_fkey" FOREIGN KEY ("cluster_id") REFERENCES "public"."cluster"("id") ON UPDATE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."staff_directory"
+    ADD CONSTRAINT "staff_directory_municipality_fkey" FOREIGN KEY ("municipality") REFERENCES "public"."municipality"("name") ON UPDATE CASCADE ON DELETE RESTRICT;
 
 
 
@@ -882,6 +994,13 @@ CREATE POLICY "staff admin write" ON "public"."staff" TO "authenticated" USING (
 CREATE POLICY "staff self read" ON "public"."staff" FOR SELECT TO "authenticated" USING ((("user_id" = "auth"."uid"()) OR (EXISTS ( SELECT 1
    FROM "public"."staff" "me"
   WHERE (("me"."user_id" = "auth"."uid"()) AND ("me"."role" = ANY (ARRAY['admin'::"text", 'provincial'::"text"])))))));
+
+
+
+ALTER TABLE "public"."staff_directory" ENABLE ROW LEVEL SECURITY;
+
+
+CREATE POLICY "staff_directory_read" ON "public"."staff_directory" FOR SELECT TO "authenticated" USING (true);
 
 
 
@@ -1294,6 +1413,18 @@ GRANT ALL ON FUNCTION "public"."similarity_op"("text", "text") TO "service_role"
 
 
 
+GRANT ALL ON FUNCTION "public"."staff_directory_compose_name"() TO "anon";
+GRANT ALL ON FUNCTION "public"."staff_directory_compose_name"() TO "authenticated";
+GRANT ALL ON FUNCTION "public"."staff_directory_compose_name"() TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."staff_directory_touch_updated_at"() TO "anon";
+GRANT ALL ON FUNCTION "public"."staff_directory_touch_updated_at"() TO "authenticated";
+GRANT ALL ON FUNCTION "public"."staff_directory_touch_updated_at"() TO "service_role";
+
+
+
 GRANT ALL ON FUNCTION "public"."strict_word_similarity"("text", "text") TO "postgres";
 GRANT ALL ON FUNCTION "public"."strict_word_similarity"("text", "text") TO "anon";
 GRANT ALL ON FUNCTION "public"."strict_word_similarity"("text", "text") TO "authenticated";
@@ -1463,6 +1594,12 @@ GRANT ALL ON TABLE "public"."staff" TO "service_role";
 
 
 
+GRANT ALL ON TABLE "public"."staff_directory" TO "anon";
+GRANT ALL ON TABLE "public"."staff_directory" TO "authenticated";
+GRANT ALL ON TABLE "public"."staff_directory" TO "service_role";
+
+
+
 GRANT ALL ON TABLE "public"."staff_municipality" TO "anon";
 GRANT ALL ON TABLE "public"."staff_municipality" TO "authenticated";
 GRANT ALL ON TABLE "public"."staff_municipality" TO "service_role";
@@ -1478,6 +1615,12 @@ GRANT ALL ON TABLE "public"."swdi_encoding" TO "service_role";
 GRANT ALL ON TABLE "public"."swdi_score" TO "anon";
 GRANT ALL ON TABLE "public"."swdi_score" TO "authenticated";
 GRANT ALL ON TABLE "public"."swdi_score" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."v_grantee_list" TO "anon";
+GRANT ALL ON TABLE "public"."v_grantee_list" TO "authenticated";
+GRANT ALL ON TABLE "public"."v_grantee_list" TO "service_role";
 
 
 
