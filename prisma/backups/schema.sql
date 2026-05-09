@@ -96,6 +96,49 @@ $$;
 ALTER FUNCTION "public"."case_typology_counts"("p_cluster" integer) OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."coa_caller_is_elevated"() RETURNS boolean
+    LANGUAGE "sql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'public'
+    AS $$
+  select exists (
+    select 1 from public.staff
+    where user_id = auth.uid()
+      and role in ('admin','provincial')
+  );
+$$;
+
+
+ALTER FUNCTION "public"."coa_caller_is_elevated"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."coa_caller_supervises"("owner" "uuid") RETURNS boolean
+    LANGUAGE "sql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'public'
+    AS $$
+  select exists (
+    select 1 from public.staff
+    where user_id = owner
+      and supervisor_user_id = auth.uid()
+  );
+$$;
+
+
+ALTER FUNCTION "public"."coa_caller_supervises"("owner" "uuid") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."coa_entry_touch_updated_at"() RETURNS "trigger"
+    LANGUAGE "plpgsql"
+    AS $$
+begin
+  new.updated_at = now();
+  return new;
+end;
+$$;
+
+
+ALTER FUNCTION "public"."coa_entry_touch_updated_at"() OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."current_scope"() RETURNS TABLE("role" "text", "cluster_id" integer, "munis" "text"[])
     LANGUAGE "sql" STABLE SECURITY DEFINER
     SET "search_path" TO 'public'
@@ -358,6 +401,39 @@ CREATE TABLE IF NOT EXISTS "public"."cluster" (
 ALTER TABLE "public"."cluster" OWNER TO "postgres";
 
 
+CREATE TABLE IF NOT EXISTS "public"."coa_entry" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "user_id" "uuid" NOT NULL,
+    "entry_date" "date" NOT NULL,
+    "presence" "text" DEFAULT 'office'::"text" NOT NULL,
+    "activity" "text",
+    "expected_output" "text",
+    "location" "text",
+    "remarks" "text",
+    "change_request" "text",
+    "change_request_status" "text" DEFAULT 'none'::"text" NOT NULL,
+    "actual_accomplishment" "text",
+    "rating_ef" smallint,
+    "rating_ql" smallint,
+    "rating_t" smallint,
+    "approval_status" "text" DEFAULT 'draft'::"text" NOT NULL,
+    "approved_by" "uuid",
+    "approved_at" timestamp with time zone,
+    "approval_remarks" "text",
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "coa_entry_approval_status_check" CHECK (("approval_status" = ANY (ARRAY['draft'::"text", 'submitted'::"text", 'approved'::"text", 'disapproved'::"text"]))),
+    CONSTRAINT "coa_entry_change_request_status_check" CHECK (("change_request_status" = ANY (ARRAY['none'::"text", 'pending'::"text", 'approved'::"text", 'denied'::"text"]))),
+    CONSTRAINT "coa_entry_presence_check" CHECK (("presence" = ANY (ARRAY['office'::"text", 'field'::"text", 'leave'::"text", 'holiday'::"text"]))),
+    CONSTRAINT "coa_entry_rating_ef_check" CHECK ((("rating_ef" >= 1) AND ("rating_ef" <= 5))),
+    CONSTRAINT "coa_entry_rating_ql_check" CHECK ((("rating_ql" >= 1) AND ("rating_ql" <= 5))),
+    CONSTRAINT "coa_entry_rating_t_check" CHECK ((("rating_t" >= 1) AND ("rating_t" <= 5)))
+);
+
+
+ALTER TABLE "public"."coa_entry" OWNER TO "postgres";
+
+
 CREATE TABLE IF NOT EXISTS "public"."grantee_import_batch" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "imported_at" timestamp with time zone DEFAULT "now"() NOT NULL,
@@ -416,6 +492,7 @@ CREATE TABLE IF NOT EXISTS "public"."staff" (
     "cluster_id" integer,
     "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "supervisor_user_id" "uuid",
     CONSTRAINT "staff_role_check" CHECK (("role" = ANY (ARRAY['admin'::"text", 'provincial'::"text", 'swoIII'::"text", 'swoII'::"text", 'field_staff'::"text"])))
 );
 
@@ -676,6 +753,16 @@ ALTER TABLE ONLY "public"."cluster"
 
 
 
+ALTER TABLE ONLY "public"."coa_entry"
+    ADD CONSTRAINT "coa_entry_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."coa_entry"
+    ADD CONSTRAINT "coa_entry_user_id_entry_date_key" UNIQUE ("user_id", "entry_date");
+
+
+
 ALTER TABLE ONLY "public"."grantee_import_batch"
     ADD CONSTRAINT "grantee_import_batch_pkey" PRIMARY KEY ("id");
 
@@ -758,6 +845,18 @@ CREATE INDEX "case_list_typology_name_idx" ON "public"."case_list" USING "btree"
 
 
 
+CREATE INDEX "coa_entry_date_idx" ON "public"."coa_entry" USING "btree" ("entry_date");
+
+
+
+CREATE INDEX "coa_entry_status_idx" ON "public"."coa_entry" USING "btree" ("approval_status");
+
+
+
+CREATE INDEX "coa_entry_user_date_idx" ON "public"."coa_entry" USING "btree" ("user_id", "entry_date");
+
+
+
 CREATE INDEX "grantee_import_batch_imported_at_idx" ON "public"."grantee_import_batch" USING "btree" ("imported_at" DESC);
 
 
@@ -810,6 +909,10 @@ CREATE UNIQUE INDEX "staff_directory_name_muni_idx" ON "public"."staff_directory
 
 
 
+CREATE INDEX "staff_supervisor_user_id_idx" ON "public"."staff" USING "btree" ("supervisor_user_id");
+
+
+
 CREATE INDEX "swdi_encoding_encoder_idx" ON "public"."swdi_encoding" USING "btree" ("encoder");
 
 
@@ -834,6 +937,10 @@ CREATE OR REPLACE TRIGGER "case_list_set_updated_at" BEFORE UPDATE ON "public"."
 
 
 
+CREATE OR REPLACE TRIGGER "coa_entry_set_updated_at" BEFORE UPDATE ON "public"."coa_entry" FOR EACH ROW EXECUTE FUNCTION "public"."coa_entry_touch_updated_at"();
+
+
+
 CREATE OR REPLACE TRIGGER "staff_directory_compose_name" BEFORE INSERT OR UPDATE OF "first_name", "middle_name", "last_name" ON "public"."staff_directory" FOR EACH ROW EXECUTE FUNCTION "public"."staff_directory_compose_name"();
 
 
@@ -853,6 +960,16 @@ ALTER TABLE ONLY "public"."case_list"
 
 ALTER TABLE ONLY "public"."case_list"
     ADD CONSTRAINT "case_list_hh_id_fkey" FOREIGN KEY ("hh_id") REFERENCES "public"."grantee_list"("hh_id") ON UPDATE CASCADE ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."coa_entry"
+    ADD CONSTRAINT "coa_entry_approved_by_fkey" FOREIGN KEY ("approved_by") REFERENCES "auth"."users"("id") ON DELETE SET NULL;
+
+
+
+ALTER TABLE ONLY "public"."coa_entry"
+    ADD CONSTRAINT "coa_entry_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "auth"."users"("id") ON DELETE CASCADE;
 
 
 
@@ -888,6 +1005,11 @@ ALTER TABLE ONLY "public"."staff_municipality"
 
 ALTER TABLE ONLY "public"."staff_municipality"
     ADD CONSTRAINT "staff_municipality_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."staff"("user_id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."staff"
+    ADD CONSTRAINT "staff_supervisor_user_id_fkey" FOREIGN KEY ("supervisor_user_id") REFERENCES "auth"."users"("id") ON DELETE SET NULL;
 
 
 
@@ -933,6 +1055,25 @@ ALTER TABLE "public"."cluster" ENABLE ROW LEVEL SECURITY;
 
 
 CREATE POLICY "cluster read" ON "public"."cluster" FOR SELECT TO "authenticated" USING (true);
+
+
+
+ALTER TABLE "public"."coa_entry" ENABLE ROW LEVEL SECURITY;
+
+
+CREATE POLICY "coa_entry_delete" ON "public"."coa_entry" FOR DELETE TO "authenticated" USING ((("user_id" = "auth"."uid"()) AND ("approval_status" = 'draft'::"text")));
+
+
+
+CREATE POLICY "coa_entry_insert" ON "public"."coa_entry" FOR INSERT TO "authenticated" WITH CHECK (("user_id" = "auth"."uid"()));
+
+
+
+CREATE POLICY "coa_entry_select" ON "public"."coa_entry" FOR SELECT TO "authenticated" USING ((("user_id" = "auth"."uid"()) OR "public"."coa_caller_supervises"("user_id") OR "public"."coa_caller_is_elevated"()));
+
+
+
+CREATE POLICY "coa_entry_update" ON "public"."coa_entry" FOR UPDATE TO "authenticated" USING ((("user_id" = "auth"."uid"()) OR "public"."coa_caller_supervises"("user_id") OR "public"."coa_caller_is_elevated"())) WITH CHECK ((("user_id" = "auth"."uid"()) OR "public"."coa_caller_supervises"("user_id") OR "public"."coa_caller_is_elevated"()));
 
 
 
@@ -1250,6 +1391,24 @@ GRANT ALL ON FUNCTION "public"."case_typology_counts"("p_cluster" integer) TO "s
 
 
 
+GRANT ALL ON FUNCTION "public"."coa_caller_is_elevated"() TO "anon";
+GRANT ALL ON FUNCTION "public"."coa_caller_is_elevated"() TO "authenticated";
+GRANT ALL ON FUNCTION "public"."coa_caller_is_elevated"() TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."coa_caller_supervises"("owner" "uuid") TO "anon";
+GRANT ALL ON FUNCTION "public"."coa_caller_supervises"("owner" "uuid") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."coa_caller_supervises"("owner" "uuid") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."coa_entry_touch_updated_at"() TO "anon";
+GRANT ALL ON FUNCTION "public"."coa_entry_touch_updated_at"() TO "authenticated";
+GRANT ALL ON FUNCTION "public"."coa_entry_touch_updated_at"() TO "service_role";
+
+
+
 GRANT ALL ON FUNCTION "public"."current_scope"() TO "anon";
 GRANT ALL ON FUNCTION "public"."current_scope"() TO "authenticated";
 GRANT ALL ON FUNCTION "public"."current_scope"() TO "service_role";
@@ -1561,6 +1720,12 @@ GRANT ALL ON TABLE "public"."case_typology_options" TO "service_role";
 GRANT ALL ON TABLE "public"."cluster" TO "anon";
 GRANT ALL ON TABLE "public"."cluster" TO "authenticated";
 GRANT ALL ON TABLE "public"."cluster" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."coa_entry" TO "anon";
+GRANT ALL ON TABLE "public"."coa_entry" TO "authenticated";
+GRANT ALL ON TABLE "public"."coa_entry" TO "service_role";
 
 
 
