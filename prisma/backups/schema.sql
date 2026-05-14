@@ -442,7 +442,8 @@ CREATE TABLE IF NOT EXISTS "public"."grantee_import_batch" (
     "total_rows" integer,
     "transfer_in_count" integer DEFAULT 0 NOT NULL,
     "transfer_out_count" integer DEFAULT 0 NOT NULL,
-    "intra_cavite_count" integer DEFAULT 0 NOT NULL
+    "intra_cavite_count" integer DEFAULT 0 NOT NULL,
+    "name_change_count" integer DEFAULT 0 NOT NULL
 );
 
 
@@ -469,7 +470,8 @@ CREATE TABLE IF NOT EXISTS "public"."grantee_transfer" (
     "new_municipality" "text",
     "new_barangay" "text",
     "detected_at" timestamp with time zone DEFAULT "now"() NOT NULL,
-    CONSTRAINT "grantee_transfer_kind_check" CHECK (("kind" = ANY (ARRAY['in'::"text", 'out'::"text", 'intra'::"text"])))
+    "old_grantee_name" "text",
+    CONSTRAINT "grantee_transfer_kind_check" CHECK (("kind" = ANY (ARRAY['in'::"text", 'out'::"text", 'intra'::"text", 'name_change'::"text"])))
 );
 
 
