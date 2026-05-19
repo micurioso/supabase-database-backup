@@ -52,6 +52,67 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp" WITH SCHEMA "extensions";
 
 
 
+CREATE OR REPLACE FUNCTION "public"."bdm_pcn_caller_can_delete"() RETURNS boolean
+    LANGUAGE "sql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'public'
+    AS $$
+  select exists (
+    select 1 from public.staff
+    where user_id = auth.uid()
+      and role in ('admin','provincial')
+  );
+$$;
+
+
+ALTER FUNCTION "public"."bdm_pcn_caller_can_delete"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."bdm_pcn_caller_can_edit_muni"("target_muni" "text") RETURNS boolean
+    LANGUAGE "sql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'public'
+    AS $$
+  select case
+    when target_muni is null then false
+    else exists (
+      select 1 from public.staff_municipality
+      where user_id = auth.uid()
+        and municipality = target_muni
+    )
+  end;
+$$;
+
+
+ALTER FUNCTION "public"."bdm_pcn_caller_can_edit_muni"("target_muni" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."bdm_pcn_caller_is_editor"() RETURNS boolean
+    LANGUAGE "sql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'public'
+    AS $$
+  select exists (
+    select 1 from public.staff
+    where user_id = auth.uid()
+      and role in ('admin','provincial','swoIII','swoII')
+  );
+$$;
+
+
+ALTER FUNCTION "public"."bdm_pcn_caller_is_editor"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."bdm_pcn_target_touch"() RETURNS "trigger"
+    LANGUAGE "plpgsql"
+    AS $$
+begin
+  new.updated_at := now();
+  return new;
+end;
+$$;
+
+
+ALTER FUNCTION "public"."bdm_pcn_target_touch"() OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."case_list_municipality"("p_hh_id" "text", "p_muni" "text") RETURNS "text"
     LANGUAGE "sql" STABLE
     AS $$
@@ -300,6 +361,40 @@ CREATE OR REPLACE VIEW "public"."barangay_options" AS
 
 
 ALTER VIEW "public"."barangay_options" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "public"."bdm_pcn_target" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "entry_id" "text" NOT NULL,
+    "hh_id" "text",
+    "region" "text",
+    "province" "text",
+    "municipality" "text",
+    "barangay" "text",
+    "last_name" "text",
+    "first_name" "text",
+    "middle_name" "text",
+    "ext_name" "text",
+    "birthday" "date",
+    "age" integer,
+    "sex" "text",
+    "relation_to_hh_head" "text",
+    "with_pcn" "text",
+    "pcn16" "text",
+    "trn29" "text",
+    "client_status" "text",
+    "member_status" "text",
+    "encoded_by" "uuid",
+    "encoded_at" timestamp with time zone,
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "bdm_pcn_target_pcn16_check" CHECK ((("pcn16" IS NULL) OR ("pcn16" ~ '^[0-9]{16}$'::"text"))),
+    CONSTRAINT "bdm_pcn_target_trn29_check" CHECK ((("trn29" IS NULL) OR ("trn29" ~ '^[0-9]{29}$'::"text"))),
+    CONSTRAINT "bdm_pcn_target_with_pcn_check" CHECK (("with_pcn" = ANY (ARRAY['yes'::"text", 'no'::"text"])))
+);
+
+
+ALTER TABLE "public"."bdm_pcn_target" OWNER TO "postgres";
 
 
 CREATE TABLE IF NOT EXISTS "public"."case_list" (
@@ -735,6 +830,16 @@ CREATE OR REPLACE VIEW "public"."v_grantee_list" WITH ("security_invoker"='on') 
 ALTER VIEW "public"."v_grantee_list" OWNER TO "postgres";
 
 
+ALTER TABLE ONLY "public"."bdm_pcn_target"
+    ADD CONSTRAINT "bdm_pcn_target_entry_id_key" UNIQUE ("entry_id");
+
+
+
+ALTER TABLE ONLY "public"."bdm_pcn_target"
+    ADD CONSTRAINT "bdm_pcn_target_pkey" PRIMARY KEY ("id");
+
+
+
 ALTER TABLE ONLY "public"."case_list"
     ADD CONSTRAINT "case_list_pkey" PRIMARY KEY ("id");
 
@@ -812,6 +917,18 @@ ALTER TABLE ONLY "public"."swdi_encoding"
 
 ALTER TABLE ONLY "public"."swdi_score"
     ADD CONSTRAINT "swdi_score_pkey" PRIMARY KEY ("transaction_no");
+
+
+
+CREATE INDEX "bdm_pcn_target_hh_id_idx" ON "public"."bdm_pcn_target" USING "btree" ("hh_id");
+
+
+
+CREATE INDEX "bdm_pcn_target_muni_idx" ON "public"."bdm_pcn_target" USING "btree" ("municipality");
+
+
+
+CREATE INDEX "bdm_pcn_target_with_pcn_idx" ON "public"."bdm_pcn_target" USING "btree" ("with_pcn");
 
 
 
@@ -935,6 +1052,10 @@ CREATE INDEX "swdi_score_hh_id_idx" ON "public"."swdi_score" USING "btree" ("hh_
 
 
 
+CREATE OR REPLACE TRIGGER "bdm_pcn_target_touch" BEFORE UPDATE ON "public"."bdm_pcn_target" FOR EACH ROW EXECUTE FUNCTION "public"."bdm_pcn_target_touch"();
+
+
+
 CREATE OR REPLACE TRIGGER "case_list_set_updated_at" BEFORE UPDATE ON "public"."case_list" FOR EACH ROW EXECUTE FUNCTION "public"."set_updated_at"();
 
 
@@ -952,6 +1073,16 @@ CREATE OR REPLACE TRIGGER "staff_directory_set_updated_at" BEFORE UPDATE ON "pub
 
 
 CREATE OR REPLACE TRIGGER "staff_set_updated_at" BEFORE UPDATE ON "public"."staff" FOR EACH ROW EXECUTE FUNCTION "public"."set_updated_at"();
+
+
+
+ALTER TABLE ONLY "public"."bdm_pcn_target"
+    ADD CONSTRAINT "bdm_pcn_target_encoded_by_fkey" FOREIGN KEY ("encoded_by") REFERENCES "auth"."users"("id") ON DELETE SET NULL;
+
+
+
+ALTER TABLE ONLY "public"."bdm_pcn_target"
+    ADD CONSTRAINT "bdm_pcn_target_municipality_fkey" FOREIGN KEY ("municipality") REFERENCES "public"."municipality"("name") ON UPDATE CASCADE;
 
 
 
@@ -1027,6 +1158,25 @@ ALTER TABLE ONLY "public"."swdi_encoding"
 
 ALTER TABLE ONLY "public"."swdi_score"
     ADD CONSTRAINT "swdi_score_hh_id_fkey" FOREIGN KEY ("hh_id") REFERENCES "public"."grantee_list"("hh_id") ON UPDATE CASCADE ON DELETE SET NULL;
+
+
+
+ALTER TABLE "public"."bdm_pcn_target" ENABLE ROW LEVEL SECURITY;
+
+
+CREATE POLICY "bdm_pcn_target_delete" ON "public"."bdm_pcn_target" FOR DELETE TO "authenticated" USING ("public"."bdm_pcn_caller_can_delete"());
+
+
+
+CREATE POLICY "bdm_pcn_target_insert" ON "public"."bdm_pcn_target" FOR INSERT TO "authenticated" WITH CHECK ("public"."bdm_pcn_caller_is_editor"());
+
+
+
+CREATE POLICY "bdm_pcn_target_select" ON "public"."bdm_pcn_target" FOR SELECT TO "authenticated" USING (true);
+
+
+
+CREATE POLICY "bdm_pcn_target_update" ON "public"."bdm_pcn_target" FOR UPDATE TO "authenticated" USING (("public"."bdm_pcn_caller_is_editor"() OR "public"."bdm_pcn_caller_can_edit_muni"("municipality")));
 
 
 
@@ -1375,6 +1525,30 @@ GRANT ALL ON FUNCTION "public"."gtrgm_out"("public"."gtrgm") TO "service_role";
 
 
 
+GRANT ALL ON FUNCTION "public"."bdm_pcn_caller_can_delete"() TO "anon";
+GRANT ALL ON FUNCTION "public"."bdm_pcn_caller_can_delete"() TO "authenticated";
+GRANT ALL ON FUNCTION "public"."bdm_pcn_caller_can_delete"() TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."bdm_pcn_caller_can_edit_muni"("target_muni" "text") TO "anon";
+GRANT ALL ON FUNCTION "public"."bdm_pcn_caller_can_edit_muni"("target_muni" "text") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."bdm_pcn_caller_can_edit_muni"("target_muni" "text") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."bdm_pcn_caller_is_editor"() TO "anon";
+GRANT ALL ON FUNCTION "public"."bdm_pcn_caller_is_editor"() TO "authenticated";
+GRANT ALL ON FUNCTION "public"."bdm_pcn_caller_is_editor"() TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."bdm_pcn_target_touch"() TO "anon";
+GRANT ALL ON FUNCTION "public"."bdm_pcn_target_touch"() TO "authenticated";
+GRANT ALL ON FUNCTION "public"."bdm_pcn_target_touch"() TO "service_role";
+
+
+
 GRANT ALL ON FUNCTION "public"."case_list_municipality"("p_hh_id" "text", "p_muni" "text") TO "anon";
 GRANT ALL ON FUNCTION "public"."case_list_municipality"("p_hh_id" "text", "p_muni" "text") TO "authenticated";
 GRANT ALL ON FUNCTION "public"."case_list_municipality"("p_hh_id" "text", "p_muni" "text") TO "service_role";
@@ -1680,6 +1854,12 @@ GRANT ALL ON TABLE "public"."grantee_list" TO "service_role";
 GRANT ALL ON TABLE "public"."barangay_options" TO "anon";
 GRANT ALL ON TABLE "public"."barangay_options" TO "authenticated";
 GRANT ALL ON TABLE "public"."barangay_options" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."bdm_pcn_target" TO "anon";
+GRANT ALL ON TABLE "public"."bdm_pcn_target" TO "authenticated";
+GRANT ALL ON TABLE "public"."bdm_pcn_target" TO "service_role";
 
 
 
