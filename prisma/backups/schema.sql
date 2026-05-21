@@ -251,6 +251,39 @@ $$;
 ALTER FUNCTION "public"."grantee_status_counts"("p_cluster" integer) OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."monitor_caller_can_edit_muni"("target_muni" "text") RETURNS boolean
+    LANGUAGE "sql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'public'
+    AS $$
+  select case
+    when target_muni is null then false
+    else exists (
+      select 1 from public.staff_municipality
+      where user_id = auth.uid()
+        and municipality = target_muni
+    )
+  end;
+$$;
+
+
+ALTER FUNCTION "public"."monitor_caller_can_edit_muni"("target_muni" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."monitor_caller_is_editor"() RETURNS boolean
+    LANGUAGE "sql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'public'
+    AS $$
+  select exists (
+    select 1 from public.staff
+    where user_id = auth.uid()
+      and role in ('admin','provincial','swoIII','swoII')
+  );
+$$;
+
+
+ALTER FUNCTION "public"."monitor_caller_is_editor"() OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."refresh_grantee_lhf"() RETURNS "void"
     LANGUAGE "sql"
     AS $$
@@ -430,6 +463,9 @@ CREATE TABLE IF NOT EXISTS "public"."case_list" (
     "approved_by" "uuid",
     "approved_at" timestamp with time zone,
     "approval_remarks" "text",
+    "scsr_reviewed" boolean DEFAULT false NOT NULL,
+    "scsr_reviewed_by" "text",
+    "scsr_reviewed_at" timestamp with time zone,
     CONSTRAINT "case_list_approval_status_check" CHECK (("approval_status" = ANY (ARRAY['pending'::"text", 'approved'::"text", 'disapproved'::"text"])))
 );
 
@@ -571,6 +607,43 @@ CREATE TABLE IF NOT EXISTS "public"."grantee_transfer" (
 
 
 ALTER TABLE "public"."grantee_transfer" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "public"."monitor" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "slug" "text" NOT NULL,
+    "name" "text" NOT NULL,
+    "description" "text",
+    "roster_columns" "jsonb" DEFAULT '[]'::"jsonb" NOT NULL,
+    "municipality_key" "text",
+    "row_key" "text",
+    "fields" "jsonb" DEFAULT '[]'::"jsonb" NOT NULL,
+    "kpis" "jsonb" DEFAULT '[]'::"jsonb" NOT NULL,
+    "active" boolean DEFAULT true NOT NULL,
+    "created_by" "uuid",
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL
+);
+
+
+ALTER TABLE "public"."monitor" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "public"."monitor_row" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "monitor_id" "uuid" NOT NULL,
+    "row_key" "text",
+    "municipality" "text",
+    "data" "jsonb" DEFAULT '{}'::"jsonb" NOT NULL,
+    "values" "jsonb" DEFAULT '{}'::"jsonb" NOT NULL,
+    "encoded_by" "uuid",
+    "encoded_at" timestamp with time zone,
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL
+);
+
+
+ALTER TABLE "public"."monitor_row" OWNER TO "postgres";
 
 
 CREATE TABLE IF NOT EXISTS "public"."municipality" (
@@ -890,6 +963,26 @@ ALTER TABLE ONLY "public"."grantee_transfer"
 
 
 
+ALTER TABLE ONLY "public"."monitor"
+    ADD CONSTRAINT "monitor_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."monitor_row"
+    ADD CONSTRAINT "monitor_row_monitor_id_row_key_key" UNIQUE ("monitor_id", "row_key");
+
+
+
+ALTER TABLE ONLY "public"."monitor_row"
+    ADD CONSTRAINT "monitor_row_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."monitor"
+    ADD CONSTRAINT "monitor_slug_key" UNIQUE ("slug");
+
+
+
 ALTER TABLE ONLY "public"."municipality"
     ADD CONSTRAINT "municipality_pkey" PRIMARY KEY ("name");
 
@@ -949,6 +1042,10 @@ CREATE INDEX "case_list_municipality_idx" ON "public"."case_list" USING "btree" 
 
 
 CREATE INDEX "case_list_risk_level_idx" ON "public"."case_list" USING "btree" ("risk_level");
+
+
+
+CREATE INDEX "case_list_scsr_reviewed_idx" ON "public"."case_list" USING "btree" ("scsr_reviewed") WHERE ("scsr_reviewed" = true);
 
 
 
@@ -1020,6 +1117,14 @@ CREATE INDEX "grantee_transfer_hh_id_idx" ON "public"."grantee_transfer" USING "
 
 
 
+CREATE INDEX "monitor_row_monitor_idx" ON "public"."monitor_row" USING "btree" ("monitor_id");
+
+
+
+CREATE INDEX "monitor_row_muni_idx" ON "public"."monitor_row" USING "btree" ("municipality");
+
+
+
 CREATE INDEX "staff_directory_municipality_idx" ON "public"."staff_directory" USING "btree" ("municipality");
 
 
@@ -1061,6 +1166,14 @@ CREATE OR REPLACE TRIGGER "case_list_set_updated_at" BEFORE UPDATE ON "public"."
 
 
 CREATE OR REPLACE TRIGGER "coa_entry_set_updated_at" BEFORE UPDATE ON "public"."coa_entry" FOR EACH ROW EXECUTE FUNCTION "public"."coa_entry_touch_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "monitor_row_set_updated_at" BEFORE UPDATE ON "public"."monitor_row" FOR EACH ROW EXECUTE FUNCTION "public"."set_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "monitor_set_updated_at" BEFORE UPDATE ON "public"."monitor" FOR EACH ROW EXECUTE FUNCTION "public"."set_updated_at"();
 
 
 
@@ -1113,6 +1226,21 @@ ALTER TABLE ONLY "public"."grantee_import_batch"
 
 ALTER TABLE ONLY "public"."grantee_transfer"
     ADD CONSTRAINT "grantee_transfer_batch_id_fkey" FOREIGN KEY ("batch_id") REFERENCES "public"."grantee_import_batch"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."monitor"
+    ADD CONSTRAINT "monitor_created_by_fkey" FOREIGN KEY ("created_by") REFERENCES "auth"."users"("id") ON DELETE SET NULL;
+
+
+
+ALTER TABLE ONLY "public"."monitor_row"
+    ADD CONSTRAINT "monitor_row_encoded_by_fkey" FOREIGN KEY ("encoded_by") REFERENCES "auth"."users"("id") ON DELETE SET NULL;
+
+
+
+ALTER TABLE ONLY "public"."monitor_row"
+    ADD CONSTRAINT "monitor_row_monitor_id_fkey" FOREIGN KEY ("monitor_id") REFERENCES "public"."monitor"("id") ON DELETE CASCADE;
 
 
 
@@ -1263,6 +1391,44 @@ ALTER TABLE "public"."grantee_transfer" ENABLE ROW LEVEL SECURITY;
 
 
 CREATE POLICY "grantee_transfer authenticated all" ON "public"."grantee_transfer" TO "authenticated" USING (true) WITH CHECK (true);
+
+
+
+ALTER TABLE "public"."monitor" ENABLE ROW LEVEL SECURITY;
+
+
+CREATE POLICY "monitor_delete" ON "public"."monitor" FOR DELETE TO "authenticated" USING ("public"."monitor_caller_is_editor"());
+
+
+
+CREATE POLICY "monitor_insert" ON "public"."monitor" FOR INSERT TO "authenticated" WITH CHECK ("public"."monitor_caller_is_editor"());
+
+
+
+ALTER TABLE "public"."monitor_row" ENABLE ROW LEVEL SECURITY;
+
+
+CREATE POLICY "monitor_row_delete" ON "public"."monitor_row" FOR DELETE TO "authenticated" USING ("public"."monitor_caller_is_editor"());
+
+
+
+CREATE POLICY "monitor_row_insert" ON "public"."monitor_row" FOR INSERT TO "authenticated" WITH CHECK (("public"."monitor_caller_is_editor"() OR "public"."monitor_caller_can_edit_muni"("municipality")));
+
+
+
+CREATE POLICY "monitor_row_select" ON "public"."monitor_row" FOR SELECT TO "authenticated" USING (true);
+
+
+
+CREATE POLICY "monitor_row_update" ON "public"."monitor_row" FOR UPDATE TO "authenticated" USING (("public"."monitor_caller_is_editor"() OR "public"."monitor_caller_can_edit_muni"("municipality"))) WITH CHECK (("public"."monitor_caller_is_editor"() OR "public"."monitor_caller_can_edit_muni"("municipality")));
+
+
+
+CREATE POLICY "monitor_select" ON "public"."monitor" FOR SELECT TO "authenticated" USING (true);
+
+
+
+CREATE POLICY "monitor_update" ON "public"."monitor" FOR UPDATE TO "authenticated" USING ("public"."monitor_caller_is_editor"()) WITH CHECK ("public"."monitor_caller_is_editor"());
 
 
 
@@ -1694,6 +1860,18 @@ GRANT ALL ON FUNCTION "public"."gtrgm_union"("internal", "internal") TO "service
 
 
 
+GRANT ALL ON FUNCTION "public"."monitor_caller_can_edit_muni"("target_muni" "text") TO "anon";
+GRANT ALL ON FUNCTION "public"."monitor_caller_can_edit_muni"("target_muni" "text") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."monitor_caller_can_edit_muni"("target_muni" "text") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."monitor_caller_is_editor"() TO "anon";
+GRANT ALL ON FUNCTION "public"."monitor_caller_is_editor"() TO "authenticated";
+GRANT ALL ON FUNCTION "public"."monitor_caller_is_editor"() TO "service_role";
+
+
+
 GRANT ALL ON FUNCTION "public"."refresh_grantee_lhf"() TO "anon";
 GRANT ALL ON FUNCTION "public"."refresh_grantee_lhf"() TO "authenticated";
 GRANT ALL ON FUNCTION "public"."refresh_grantee_lhf"() TO "service_role";
@@ -1926,6 +2104,18 @@ GRANT ALL ON TABLE "public"."grantee_status_options" TO "service_role";
 GRANT ALL ON TABLE "public"."grantee_transfer" TO "anon";
 GRANT ALL ON TABLE "public"."grantee_transfer" TO "authenticated";
 GRANT ALL ON TABLE "public"."grantee_transfer" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."monitor" TO "anon";
+GRANT ALL ON TABLE "public"."monitor" TO "authenticated";
+GRANT ALL ON TABLE "public"."monitor" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."monitor_row" TO "anon";
+GRANT ALL ON TABLE "public"."monitor_row" TO "authenticated";
+GRANT ALL ON TABLE "public"."monitor_row" TO "service_role";
 
 
 
