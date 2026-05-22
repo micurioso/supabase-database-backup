@@ -622,7 +622,9 @@ CREATE TABLE IF NOT EXISTS "public"."monitor" (
     "active" boolean DEFAULT true NOT NULL,
     "created_by" "uuid",
     "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
-    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "sidebar_group" "text",
+    "sidebar_icon" "text"
 );
 
 
