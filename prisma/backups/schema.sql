@@ -379,7 +379,10 @@ CREATE TABLE IF NOT EXISTS "public"."grantee_list" (
     "registered" "text",
     "l3_consolidated" "text",
     "assigned_cml" "text",
-    "lhf" boolean
+    "lhf" boolean,
+    "target_group" "text"[],
+    "previous_case_manager" "text",
+    "case_manager_unassigned_at" timestamp with time zone
 );
 
 
@@ -657,6 +660,27 @@ CREATE TABLE IF NOT EXISTS "public"."municipality" (
 ALTER TABLE "public"."municipality" OWNER TO "postgres";
 
 
+CREATE TABLE IF NOT EXISTS "public"."registration_request" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "user_id" "uuid" NOT NULL,
+    "username" "text" NOT NULL,
+    "first_name" "text" NOT NULL,
+    "middle_name" "text",
+    "last_name" "text" NOT NULL,
+    "municipality" "text" NOT NULL,
+    "status" "text" DEFAULT 'pending'::"text" NOT NULL,
+    "reviewed_by" "uuid",
+    "reviewed_at" timestamp with time zone,
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "designation" "text",
+    "employee_no" "text",
+    CONSTRAINT "registration_request_status_check" CHECK (("status" = ANY (ARRAY['pending'::"text", 'approved'::"text", 'rejected'::"text"])))
+);
+
+
+ALTER TABLE "public"."registration_request" OWNER TO "postgres";
+
+
 CREATE TABLE IF NOT EXISTS "public"."staff" (
     "user_id" "uuid" NOT NULL,
     "full_name" "text",
@@ -665,6 +689,7 @@ CREATE TABLE IF NOT EXISTS "public"."staff" (
     "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "supervisor_user_id" "uuid",
+    "employee_no" "text",
     CONSTRAINT "staff_role_check" CHECK (("role" = ANY (ARRAY['admin'::"text", 'provincial'::"text", 'swoIII'::"text", 'swoII'::"text", 'field_staff'::"text"])))
 );
 
@@ -896,6 +921,9 @@ CREATE OR REPLACE VIEW "public"."v_grantee_list" WITH ("security_invoker"='on') 
     "l3_consolidated",
     "assigned_cml",
     "lhf",
+    "target_group",
+    "previous_case_manager",
+    "case_manager_unassigned_at",
     (EXISTS ( SELECT 1
            FROM "public"."case_list" "c"
           WHERE (("c"."hh_id" = "g"."hh_id") AND ("c"."is_manual_entry" = false) AND ("c"."record_no" IS NOT NULL)))) AS "has_verified_record_no"
@@ -987,6 +1015,11 @@ ALTER TABLE ONLY "public"."monitor"
 
 ALTER TABLE ONLY "public"."municipality"
     ADD CONSTRAINT "municipality_pkey" PRIMARY KEY ("name");
+
+
+
+ALTER TABLE ONLY "public"."registration_request"
+    ADD CONSTRAINT "registration_request_pkey" PRIMARY KEY ("id");
 
 
 
@@ -1107,6 +1140,10 @@ CREATE INDEX "grantee_list_status_trgm_idx" ON "public"."grantee_list" USING "gi
 
 
 
+CREATE INDEX "grantee_list_target_group_gin_idx" ON "public"."grantee_list" USING "gin" ("target_group");
+
+
+
 CREATE INDEX "grantee_list_target_tag_idx" ON "public"."grantee_list" USING "btree" ("target_tag");
 
 
@@ -1127,11 +1164,19 @@ CREATE INDEX "monitor_row_muni_idx" ON "public"."monitor_row" USING "btree" ("mu
 
 
 
+CREATE INDEX "registration_request_status_idx" ON "public"."registration_request" USING "btree" ("status");
+
+
+
 CREATE INDEX "staff_directory_municipality_idx" ON "public"."staff_directory" USING "btree" ("municipality");
 
 
 
 CREATE UNIQUE INDEX "staff_directory_name_muni_idx" ON "public"."staff_directory" USING "btree" ("lower"("name"), "municipality");
+
+
+
+CREATE UNIQUE INDEX "staff_employee_no_key" ON "public"."staff" USING "btree" ("employee_no") WHERE ("employee_no" IS NOT NULL);
 
 
 
@@ -1248,6 +1293,21 @@ ALTER TABLE ONLY "public"."monitor_row"
 
 ALTER TABLE ONLY "public"."municipality"
     ADD CONSTRAINT "municipality_cluster_id_fkey" FOREIGN KEY ("cluster_id") REFERENCES "public"."cluster"("id") ON UPDATE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."registration_request"
+    ADD CONSTRAINT "registration_request_municipality_fkey" FOREIGN KEY ("municipality") REFERENCES "public"."municipality"("name") ON UPDATE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."registration_request"
+    ADD CONSTRAINT "registration_request_reviewed_by_fkey" FOREIGN KEY ("reviewed_by") REFERENCES "auth"."users"("id");
+
+
+
+ALTER TABLE ONLY "public"."registration_request"
+    ADD CONSTRAINT "registration_request_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "auth"."users"("id") ON DELETE CASCADE;
 
 
 
@@ -1441,6 +1501,9 @@ CREATE POLICY "municipality read" ON "public"."municipality" FOR SELECT TO "auth
 
 
 
+ALTER TABLE "public"."registration_request" ENABLE ROW LEVEL SECURITY;
+
+
 ALTER TABLE "public"."staff" ENABLE ROW LEVEL SECURITY;
 
 
@@ -1523,6 +1586,10 @@ CREATE POLICY "swdi_score scoped write" ON "public"."swdi_score" TO "authenticat
 
 
 ALTER PUBLICATION "supabase_realtime" OWNER TO "postgres";
+
+
+
+
 
 
 GRANT USAGE ON SCHEMA "public" TO "postgres";
@@ -2124,6 +2191,12 @@ GRANT ALL ON TABLE "public"."monitor_row" TO "service_role";
 GRANT ALL ON TABLE "public"."municipality" TO "anon";
 GRANT ALL ON TABLE "public"."municipality" TO "authenticated";
 GRANT ALL ON TABLE "public"."municipality" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."registration_request" TO "anon";
+GRANT ALL ON TABLE "public"."registration_request" TO "authenticated";
+GRANT ALL ON TABLE "public"."registration_request" TO "service_role";
 
 
 
