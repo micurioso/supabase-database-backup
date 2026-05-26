@@ -690,7 +690,7 @@ CREATE TABLE IF NOT EXISTS "public"."staff" (
     "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "supervisor_user_id" "uuid",
     "employee_no" "text",
-    CONSTRAINT "staff_role_check" CHECK (("role" = ANY (ARRAY['admin'::"text", 'provincial'::"text", 'swoIII'::"text", 'swoII'::"text", 'field_staff'::"text"])))
+    CONSTRAINT "staff_role_check" CHECK (("role" = ANY (ARRAY['admin'::"text", 'provincial'::"text", 'swoIII'::"text", 'swoII'::"text", 'case_manager'::"text"])))
 );
 
 
@@ -707,7 +707,8 @@ CREATE TABLE IF NOT EXISTS "public"."staff_directory" (
     "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "first_name" "text" NOT NULL,
     "middle_name" "text",
-    "last_name" "text" NOT NULL
+    "last_name" "text" NOT NULL,
+    "employee_no" "text"
 );
 
 
@@ -1377,7 +1378,7 @@ CREATE POLICY "case_list scoped read" ON "public"."case_list" FOR SELECT TO "aut
    FROM "public"."current_scope"() "cs"("role", "cluster_id", "munis")
   WHERE (("cs"."role" = ANY (ARRAY['admin'::"text", 'provincial'::"text"])) OR (("cs"."role" = ANY (ARRAY['swoIII'::"text", 'swoII'::"text"])) AND ("cs"."cluster_id" = ( SELECT "m"."cluster_id"
            FROM "public"."municipality" "m"
-          WHERE ("m"."name" = "public"."case_list_municipality"("case_list"."hh_id", "case_list"."municipality"))))) OR (("cs"."role" = 'field_staff'::"text") AND ("public"."case_list_municipality"("case_list"."hh_id", "case_list"."municipality") = ANY ("cs"."munis")))))));
+          WHERE ("m"."name" = "public"."case_list_municipality"("case_list"."hh_id", "case_list"."municipality"))))) OR (("cs"."role" = 'case_manager'::"text") AND ("public"."case_list_municipality"("case_list"."hh_id", "case_list"."municipality") = ANY ("cs"."munis")))))));
 
 
 
@@ -1385,11 +1386,11 @@ CREATE POLICY "case_list scoped write" ON "public"."case_list" TO "authenticated
    FROM "public"."current_scope"() "cs"("role", "cluster_id", "munis")
   WHERE (("cs"."role" = ANY (ARRAY['admin'::"text", 'provincial'::"text"])) OR (("cs"."role" = ANY (ARRAY['swoIII'::"text", 'swoII'::"text"])) AND ("cs"."cluster_id" = ( SELECT "m"."cluster_id"
            FROM "public"."municipality" "m"
-          WHERE ("m"."name" = "public"."case_list_municipality"("case_list"."hh_id", "case_list"."municipality"))))) OR (("cs"."role" = 'field_staff'::"text") AND ("public"."case_list_municipality"("case_list"."hh_id", "case_list"."municipality") = ANY ("cs"."munis"))))))) WITH CHECK ((EXISTS ( SELECT 1
+          WHERE ("m"."name" = "public"."case_list_municipality"("case_list"."hh_id", "case_list"."municipality"))))) OR (("cs"."role" = 'case_manager'::"text") AND ("public"."case_list_municipality"("case_list"."hh_id", "case_list"."municipality") = ANY ("cs"."munis"))))))) WITH CHECK ((EXISTS ( SELECT 1
    FROM "public"."current_scope"() "cs"("role", "cluster_id", "munis")
   WHERE (("cs"."role" = ANY (ARRAY['admin'::"text", 'provincial'::"text"])) OR (("cs"."role" = ANY (ARRAY['swoIII'::"text", 'swoII'::"text"])) AND ("cs"."cluster_id" = ( SELECT "m"."cluster_id"
            FROM "public"."municipality" "m"
-          WHERE ("m"."name" = "public"."case_list_municipality"("case_list"."hh_id", "case_list"."municipality"))))) OR (("cs"."role" = 'field_staff'::"text") AND ("public"."case_list_municipality"("case_list"."hh_id", "case_list"."municipality") = ANY ("cs"."munis")))))));
+          WHERE ("m"."name" = "public"."case_list_municipality"("case_list"."hh_id", "case_list"."municipality"))))) OR (("cs"."role" = 'case_manager'::"text") AND ("public"."case_list_municipality"("case_list"."hh_id", "case_list"."municipality") = ANY ("cs"."munis")))))));
 
 
 
@@ -1433,7 +1434,7 @@ CREATE POLICY "grantee_list scoped read" ON "public"."grantee_list" FOR SELECT T
    FROM "public"."current_scope"() "cs"("role", "cluster_id", "munis")
   WHERE (("cs"."role" = ANY (ARRAY['admin'::"text", 'provincial'::"text"])) OR (("cs"."role" = ANY (ARRAY['swoIII'::"text", 'swoII'::"text"])) AND ("cs"."cluster_id" = ( SELECT "m"."cluster_id"
            FROM "public"."municipality" "m"
-          WHERE ("m"."name" = "grantee_list"."municipality")))) OR (("cs"."role" = 'field_staff'::"text") AND ("grantee_list"."municipality" = ANY ("cs"."munis")))))));
+          WHERE ("m"."name" = "grantee_list"."municipality")))) OR (("cs"."role" = 'case_manager'::"text") AND ("grantee_list"."municipality" = ANY ("cs"."munis")))))));
 
 
 
@@ -1441,11 +1442,11 @@ CREATE POLICY "grantee_list scoped write" ON "public"."grantee_list" TO "authent
    FROM "public"."current_scope"() "cs"("role", "cluster_id", "munis")
   WHERE (("cs"."role" = ANY (ARRAY['admin'::"text", 'provincial'::"text"])) OR (("cs"."role" = ANY (ARRAY['swoIII'::"text", 'swoII'::"text"])) AND ("cs"."cluster_id" = ( SELECT "m"."cluster_id"
            FROM "public"."municipality" "m"
-          WHERE ("m"."name" = "grantee_list"."municipality")))) OR (("cs"."role" = 'field_staff'::"text") AND ("grantee_list"."municipality" = ANY ("cs"."munis"))))))) WITH CHECK ((EXISTS ( SELECT 1
+          WHERE ("m"."name" = "grantee_list"."municipality")))) OR (("cs"."role" = 'case_manager'::"text") AND ("grantee_list"."municipality" = ANY ("cs"."munis"))))))) WITH CHECK ((EXISTS ( SELECT 1
    FROM "public"."current_scope"() "cs"("role", "cluster_id", "munis")
   WHERE (("cs"."role" = ANY (ARRAY['admin'::"text", 'provincial'::"text"])) OR (("cs"."role" = ANY (ARRAY['swoIII'::"text", 'swoII'::"text"])) AND ("cs"."cluster_id" = ( SELECT "m"."cluster_id"
            FROM "public"."municipality" "m"
-          WHERE ("m"."name" = "grantee_list"."municipality")))) OR (("cs"."role" = 'field_staff'::"text") AND ("grantee_list"."municipality" = ANY ("cs"."munis")))))));
+          WHERE ("m"."name" = "grantee_list"."municipality")))) OR (("cs"."role" = 'case_manager'::"text") AND ("grantee_list"."municipality" = ANY ("cs"."munis")))))));
 
 
 
@@ -1552,7 +1553,7 @@ CREATE POLICY "swdi_encoding scoped read" ON "public"."swdi_encoding" FOR SELECT
    FROM "public"."current_scope"() "cs"("role", "cluster_id", "munis")
   WHERE (("cs"."role" = ANY (ARRAY['admin'::"text", 'provincial'::"text"])) OR (("cs"."role" = ANY (ARRAY['swoIII'::"text", 'swoII'::"text"])) AND ("cs"."cluster_id" = ( SELECT "m"."cluster_id"
            FROM "public"."municipality" "m"
-          WHERE ("m"."name" = "swdi_encoding"."municipality")))) OR (("cs"."role" = 'field_staff'::"text") AND ("swdi_encoding"."municipality" = ANY ("cs"."munis")))))));
+          WHERE ("m"."name" = "swdi_encoding"."municipality")))) OR (("cs"."role" = 'case_manager'::"text") AND ("swdi_encoding"."municipality" = ANY ("cs"."munis")))))));
 
 
 
@@ -1571,7 +1572,7 @@ CREATE POLICY "swdi_score scoped read" ON "public"."swdi_score" FOR SELECT TO "a
    FROM "public"."current_scope"() "cs"("role", "cluster_id", "munis")
   WHERE (("cs"."role" = ANY (ARRAY['admin'::"text", 'provincial'::"text"])) OR (("cs"."role" = ANY (ARRAY['swoIII'::"text", 'swoII'::"text"])) AND ("cs"."cluster_id" = ( SELECT "m"."cluster_id"
            FROM "public"."municipality" "m"
-          WHERE ("m"."name" = "swdi_score"."city_name")))) OR (("cs"."role" = 'field_staff'::"text") AND ("swdi_score"."city_name" = ANY ("cs"."munis")))))));
+          WHERE ("m"."name" = "swdi_score"."city_name")))) OR (("cs"."role" = 'case_manager'::"text") AND ("swdi_score"."city_name" = ANY ("cs"."munis")))))));
 
 
 
