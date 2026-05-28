@@ -1065,11 +1065,27 @@ CREATE INDEX "case_list_approval_status_idx" ON "public"."case_list" USING "btre
 
 
 
+CREATE INDEX "case_list_assigned_case_manager_idx" ON "public"."case_list" USING "btree" ("assigned_case_manager") WHERE ("assigned_case_manager" IS NOT NULL);
+
+
+
+CREATE INDEX "case_list_date_encoded_idx" ON "public"."case_list" USING "btree" ("date_encoded");
+
+
+
 CREATE INDEX "case_list_hh_id_idx" ON "public"."case_list" USING "btree" ("hh_id");
 
 
 
 CREATE INDEX "case_list_hh_id_verified_idx" ON "public"."case_list" USING "btree" ("hh_id") WHERE (("is_manual_entry" = false) AND ("record_no" IS NOT NULL));
+
+
+
+CREATE INDEX "case_list_is_manual_entry_idx" ON "public"."case_list" USING "btree" ("is_manual_entry");
+
+
+
+CREATE INDEX "case_list_muni_date_idx" ON "public"."case_list" USING "btree" ("municipality", "date_encoded");
 
 
 
@@ -1129,6 +1145,14 @@ CREATE INDEX "grantee_list_lhf_idx" ON "public"."grantee_list" USING "btree" ("l
 
 
 
+CREATE INDEX "grantee_list_muni_barangay_idx" ON "public"."grantee_list" USING "btree" ("municipality", "barangay") WHERE (("barangay" IS NOT NULL) AND ("municipality" IS NOT NULL));
+
+
+
+CREATE INDEX "grantee_list_muni_status_idx" ON "public"."grantee_list" USING "btree" ("municipality", "status");
+
+
+
 CREATE INDEX "grantee_list_municipality_idx" ON "public"."grantee_list" USING "btree" ("municipality");
 
 
@@ -1165,6 +1189,10 @@ CREATE INDEX "monitor_row_muni_idx" ON "public"."monitor_row" USING "btree" ("mu
 
 
 
+CREATE INDEX "municipality_cluster_id_idx" ON "public"."municipality" USING "btree" ("cluster_id");
+
+
+
 CREATE INDEX "registration_request_status_idx" ON "public"."registration_request" USING "btree" ("status");
 
 
@@ -1198,6 +1226,10 @@ CREATE INDEX "swdi_encoding_municipality_idx" ON "public"."swdi_encoding" USING 
 
 
 CREATE INDEX "swdi_score_city_name_idx" ON "public"."swdi_score" USING "btree" ("city_name");
+
+
+
+CREATE INDEX "swdi_score_hh_id_date_idx" ON "public"."swdi_score" USING "btree" ("hh_id", "date_of_interview" DESC NULLS LAST, "created_at" DESC);
 
 
 
