@@ -157,6 +157,26 @@ $$;
 ALTER FUNCTION "public"."case_typology_counts"("p_cluster" integer) OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."coa_caller_approves_cluster"("owner" "uuid") RETURNS boolean
+    LANGUAGE "sql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'public'
+    AS $$
+  select exists (
+    select 1
+    from public.staff me
+    join public.staff owner_s on owner_s.user_id = owner
+    where me.user_id = auth.uid()
+      and me.role = 'swoIII'
+      and me.cluster_id is not null
+      and owner_s.role in ('case_manager','social_welfare_assistant')
+      and owner_s.cluster_id = me.cluster_id
+  );
+$$;
+
+
+ALTER FUNCTION "public"."coa_caller_approves_cluster"("owner" "uuid") OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."coa_caller_is_elevated"() RETURNS boolean
     LANGUAGE "sql" STABLE SECURITY DEFINER
     SET "search_path" TO 'public'
@@ -187,6 +207,26 @@ $$;
 ALTER FUNCTION "public"."coa_caller_supervises"("owner" "uuid") OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."coa_caller_supervises_cluster"("owner" "uuid") RETURNS boolean
+    LANGUAGE "sql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'public'
+    AS $$
+  select exists (
+    select 1
+    from public.staff me
+    join public.staff owner_s on owner_s.user_id = owner
+    where me.user_id = auth.uid()
+      and me.role in ('swoIII','swoII')
+      and me.cluster_id is not null
+      and owner_s.role in ('case_manager','social_welfare_assistant')
+      and owner_s.cluster_id = me.cluster_id
+  );
+$$;
+
+
+ALTER FUNCTION "public"."coa_caller_supervises_cluster"("owner" "uuid") OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."coa_entry_touch_updated_at"() RETURNS "trigger"
     LANGUAGE "plpgsql"
     AS $$
@@ -198,6 +238,22 @@ $$;
 
 
 ALTER FUNCTION "public"."coa_entry_touch_updated_at"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."coa_mark_change_request_unseen"() RETURNS "trigger"
+    LANGUAGE "plpgsql"
+    AS $$
+begin
+  if OLD.change_request_status = 'pending'
+     and NEW.change_request_status in ('approved', 'denied') then
+    new.change_request_seen := false;
+  end if;
+  return new;
+end;
+$$;
+
+
+ALTER FUNCTION "public"."coa_mark_change_request_unseen"() OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "public"."current_scope"() RETURNS TABLE("role" "text", "cluster_id" integer, "munis" "text"[])
@@ -556,6 +612,7 @@ CREATE TABLE IF NOT EXISTS "public"."coa_entry" (
     "approval_remarks" "text",
     "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "change_request_seen" boolean DEFAULT true NOT NULL,
     CONSTRAINT "coa_entry_approval_status_check" CHECK (("approval_status" = ANY (ARRAY['draft'::"text", 'submitted'::"text", 'approved'::"text", 'disapproved'::"text"]))),
     CONSTRAINT "coa_entry_change_request_status_check" CHECK (("change_request_status" = ANY (ARRAY['none'::"text", 'pending'::"text", 'approved'::"text", 'denied'::"text"]))),
     CONSTRAINT "coa_entry_presence_check" CHECK (("presence" = ANY (ARRAY['office'::"text", 'field'::"text", 'leave'::"text", 'holiday'::"text"]))),
@@ -660,6 +717,15 @@ CREATE TABLE IF NOT EXISTS "public"."municipality" (
 ALTER TABLE "public"."municipality" OWNER TO "postgres";
 
 
+CREATE TABLE IF NOT EXISTS "public"."notification_clear" (
+    "user_id" "uuid" NOT NULL,
+    "cleared_at" timestamp with time zone DEFAULT "now"() NOT NULL
+);
+
+
+ALTER TABLE "public"."notification_clear" OWNER TO "postgres";
+
+
 CREATE TABLE IF NOT EXISTS "public"."registration_request" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "user_id" "uuid" NOT NULL,
@@ -674,6 +740,7 @@ CREATE TABLE IF NOT EXISTS "public"."registration_request" (
     "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "designation" "text",
     "employee_no" "text",
+    "cluster_id" integer,
     CONSTRAINT "registration_request_status_check" CHECK (("status" = ANY (ARRAY['pending'::"text", 'approved'::"text", 'rejected'::"text"])))
 );
 
@@ -690,7 +757,7 @@ CREATE TABLE IF NOT EXISTS "public"."staff" (
     "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "supervisor_user_id" "uuid",
     "employee_no" "text",
-    CONSTRAINT "staff_role_check" CHECK (("role" = ANY (ARRAY['admin'::"text", 'provincial'::"text", 'swoIII'::"text", 'swoII'::"text", 'case_manager'::"text"])))
+    CONSTRAINT "staff_role_check" CHECK (("role" = ANY (ARRAY['admin'::"text", 'provincial'::"text", 'swoIII'::"text", 'swoII'::"text", 'case_manager'::"text", 'social_welfare_assistant'::"text", 'poo_staff'::"text"])))
 );
 
 
@@ -899,6 +966,16 @@ COMMENT ON COLUMN "public"."swdi_score"."fa3" IS 'Awareness of disaster risk red
 
 
 
+CREATE TABLE IF NOT EXISTS "public"."transfer_ack" (
+    "user_id" "uuid" NOT NULL,
+    "transfer_id" "uuid" NOT NULL,
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL
+);
+
+
+ALTER TABLE "public"."transfer_ack" OWNER TO "postgres";
+
+
 CREATE OR REPLACE VIEW "public"."v_grantee_list" WITH ("security_invoker"='on') AS
  SELECT "id",
     "hh_id",
@@ -1019,6 +1096,11 @@ ALTER TABLE ONLY "public"."municipality"
 
 
 
+ALTER TABLE ONLY "public"."notification_clear"
+    ADD CONSTRAINT "notification_clear_pkey" PRIMARY KEY ("user_id");
+
+
+
 ALTER TABLE ONLY "public"."registration_request"
     ADD CONSTRAINT "registration_request_pkey" PRIMARY KEY ("id");
 
@@ -1046,6 +1128,11 @@ ALTER TABLE ONLY "public"."swdi_encoding"
 
 ALTER TABLE ONLY "public"."swdi_score"
     ADD CONSTRAINT "swdi_score_pkey" PRIMARY KEY ("transaction_no");
+
+
+
+ALTER TABLE ONLY "public"."transfer_ack"
+    ADD CONSTRAINT "transfer_ack_pkey" PRIMARY KEY ("user_id", "transfer_id");
 
 
 
@@ -1237,11 +1324,19 @@ CREATE INDEX "swdi_score_hh_id_idx" ON "public"."swdi_score" USING "btree" ("hh_
 
 
 
+CREATE INDEX "transfer_ack_user_idx" ON "public"."transfer_ack" USING "btree" ("user_id");
+
+
+
 CREATE OR REPLACE TRIGGER "bdm_pcn_target_touch" BEFORE UPDATE ON "public"."bdm_pcn_target" FOR EACH ROW EXECUTE FUNCTION "public"."bdm_pcn_target_touch"();
 
 
 
 CREATE OR REPLACE TRIGGER "case_list_set_updated_at" BEFORE UPDATE ON "public"."case_list" FOR EACH ROW EXECUTE FUNCTION "public"."set_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "coa_entry_mark_change_request_unseen" BEFORE UPDATE ON "public"."coa_entry" FOR EACH ROW EXECUTE FUNCTION "public"."coa_mark_change_request_unseen"();
 
 
 
@@ -1329,6 +1424,16 @@ ALTER TABLE ONLY "public"."municipality"
 
 
 
+ALTER TABLE ONLY "public"."notification_clear"
+    ADD CONSTRAINT "notification_clear_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "auth"."users"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."registration_request"
+    ADD CONSTRAINT "registration_request_cluster_id_fkey" FOREIGN KEY ("cluster_id") REFERENCES "public"."cluster"("id") ON UPDATE CASCADE;
+
+
+
 ALTER TABLE ONLY "public"."registration_request"
     ADD CONSTRAINT "registration_request_municipality_fkey" FOREIGN KEY ("municipality") REFERENCES "public"."municipality"("name") ON UPDATE CASCADE;
 
@@ -1384,6 +1489,16 @@ ALTER TABLE ONLY "public"."swdi_score"
 
 
 
+ALTER TABLE ONLY "public"."transfer_ack"
+    ADD CONSTRAINT "transfer_ack_transfer_id_fkey" FOREIGN KEY ("transfer_id") REFERENCES "public"."grantee_transfer"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."transfer_ack"
+    ADD CONSTRAINT "transfer_ack_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "auth"."users"("id") ON DELETE CASCADE;
+
+
+
 ALTER TABLE "public"."bdm_pcn_target" ENABLE ROW LEVEL SECURITY;
 
 
@@ -1408,9 +1523,9 @@ ALTER TABLE "public"."case_list" ENABLE ROW LEVEL SECURITY;
 
 CREATE POLICY "case_list scoped read" ON "public"."case_list" FOR SELECT TO "authenticated" USING ((EXISTS ( SELECT 1
    FROM "public"."current_scope"() "cs"("role", "cluster_id", "munis")
-  WHERE (("cs"."role" = ANY (ARRAY['admin'::"text", 'provincial'::"text"])) OR (("cs"."role" = ANY (ARRAY['swoIII'::"text", 'swoII'::"text"])) AND ("cs"."cluster_id" = ( SELECT "m"."cluster_id"
+  WHERE (("cs"."role" = ANY (ARRAY['admin'::"text", 'provincial'::"text", 'poo_staff'::"text"])) OR (("cs"."role" = ANY (ARRAY['swoIII'::"text", 'swoII'::"text"])) AND ("cs"."cluster_id" = ( SELECT "m"."cluster_id"
            FROM "public"."municipality" "m"
-          WHERE ("m"."name" = "public"."case_list_municipality"("case_list"."hh_id", "case_list"."municipality"))))) OR (("cs"."role" = 'case_manager'::"text") AND ("public"."case_list_municipality"("case_list"."hh_id", "case_list"."municipality") = ANY ("cs"."munis")))))));
+          WHERE ("m"."name" = "public"."case_list_municipality"("case_list"."hh_id", "case_list"."municipality"))))) OR (("cs"."role" = ANY (ARRAY['case_manager'::"text", 'social_welfare_assistant'::"text"])) AND ("public"."case_list_municipality"("case_list"."hh_id", "case_list"."municipality") = ANY ("cs"."munis")))))));
 
 
 
@@ -1418,11 +1533,11 @@ CREATE POLICY "case_list scoped write" ON "public"."case_list" TO "authenticated
    FROM "public"."current_scope"() "cs"("role", "cluster_id", "munis")
   WHERE (("cs"."role" = ANY (ARRAY['admin'::"text", 'provincial'::"text"])) OR (("cs"."role" = ANY (ARRAY['swoIII'::"text", 'swoII'::"text"])) AND ("cs"."cluster_id" = ( SELECT "m"."cluster_id"
            FROM "public"."municipality" "m"
-          WHERE ("m"."name" = "public"."case_list_municipality"("case_list"."hh_id", "case_list"."municipality"))))) OR (("cs"."role" = 'case_manager'::"text") AND ("public"."case_list_municipality"("case_list"."hh_id", "case_list"."municipality") = ANY ("cs"."munis"))))))) WITH CHECK ((EXISTS ( SELECT 1
+          WHERE ("m"."name" = "public"."case_list_municipality"("case_list"."hh_id", "case_list"."municipality"))))) OR (("cs"."role" = ANY (ARRAY['case_manager'::"text", 'social_welfare_assistant'::"text"])) AND ("public"."case_list_municipality"("case_list"."hh_id", "case_list"."municipality") = ANY ("cs"."munis"))))))) WITH CHECK ((EXISTS ( SELECT 1
    FROM "public"."current_scope"() "cs"("role", "cluster_id", "munis")
   WHERE (("cs"."role" = ANY (ARRAY['admin'::"text", 'provincial'::"text"])) OR (("cs"."role" = ANY (ARRAY['swoIII'::"text", 'swoII'::"text"])) AND ("cs"."cluster_id" = ( SELECT "m"."cluster_id"
            FROM "public"."municipality" "m"
-          WHERE ("m"."name" = "public"."case_list_municipality"("case_list"."hh_id", "case_list"."municipality"))))) OR (("cs"."role" = 'case_manager'::"text") AND ("public"."case_list_municipality"("case_list"."hh_id", "case_list"."municipality") = ANY ("cs"."munis")))))));
+          WHERE ("m"."name" = "public"."case_list_municipality"("case_list"."hh_id", "case_list"."municipality"))))) OR (("cs"."role" = ANY (ARRAY['case_manager'::"text", 'social_welfare_assistant'::"text"])) AND ("public"."case_list_municipality"("case_list"."hh_id", "case_list"."municipality") = ANY ("cs"."munis")))))));
 
 
 
@@ -1444,11 +1559,11 @@ CREATE POLICY "coa_entry_insert" ON "public"."coa_entry" FOR INSERT TO "authenti
 
 
 
-CREATE POLICY "coa_entry_select" ON "public"."coa_entry" FOR SELECT TO "authenticated" USING ((("user_id" = "auth"."uid"()) OR "public"."coa_caller_supervises"("user_id") OR "public"."coa_caller_is_elevated"()));
+CREATE POLICY "coa_entry_select" ON "public"."coa_entry" FOR SELECT TO "authenticated" USING ((("user_id" = "auth"."uid"()) OR "public"."coa_caller_supervises"("user_id") OR "public"."coa_caller_supervises_cluster"("user_id") OR "public"."coa_caller_is_elevated"()));
 
 
 
-CREATE POLICY "coa_entry_update" ON "public"."coa_entry" FOR UPDATE TO "authenticated" USING ((("user_id" = "auth"."uid"()) OR "public"."coa_caller_supervises"("user_id") OR "public"."coa_caller_is_elevated"())) WITH CHECK ((("user_id" = "auth"."uid"()) OR "public"."coa_caller_supervises"("user_id") OR "public"."coa_caller_is_elevated"()));
+CREATE POLICY "coa_entry_update" ON "public"."coa_entry" FOR UPDATE TO "authenticated" USING ((("user_id" = "auth"."uid"()) OR "public"."coa_caller_supervises"("user_id") OR "public"."coa_caller_approves_cluster"("user_id") OR "public"."coa_caller_is_elevated"())) WITH CHECK ((("user_id" = "auth"."uid"()) OR "public"."coa_caller_supervises"("user_id") OR "public"."coa_caller_approves_cluster"("user_id") OR "public"."coa_caller_is_elevated"()));
 
 
 
@@ -1464,9 +1579,9 @@ ALTER TABLE "public"."grantee_list" ENABLE ROW LEVEL SECURITY;
 
 CREATE POLICY "grantee_list scoped read" ON "public"."grantee_list" FOR SELECT TO "authenticated" USING ((EXISTS ( SELECT 1
    FROM "public"."current_scope"() "cs"("role", "cluster_id", "munis")
-  WHERE (("cs"."role" = ANY (ARRAY['admin'::"text", 'provincial'::"text"])) OR (("cs"."role" = ANY (ARRAY['swoIII'::"text", 'swoII'::"text"])) AND ("cs"."cluster_id" = ( SELECT "m"."cluster_id"
+  WHERE (("cs"."role" = ANY (ARRAY['admin'::"text", 'provincial'::"text", 'poo_staff'::"text"])) OR (("cs"."role" = ANY (ARRAY['swoIII'::"text", 'swoII'::"text"])) AND ("cs"."cluster_id" = ( SELECT "m"."cluster_id"
            FROM "public"."municipality" "m"
-          WHERE ("m"."name" = "grantee_list"."municipality")))) OR (("cs"."role" = 'case_manager'::"text") AND ("grantee_list"."municipality" = ANY ("cs"."munis")))))));
+          WHERE ("m"."name" = "grantee_list"."municipality")))) OR (("cs"."role" = ANY (ARRAY['case_manager'::"text", 'social_welfare_assistant'::"text"])) AND ("grantee_list"."municipality" = ANY ("cs"."munis")))))));
 
 
 
@@ -1474,11 +1589,11 @@ CREATE POLICY "grantee_list scoped write" ON "public"."grantee_list" TO "authent
    FROM "public"."current_scope"() "cs"("role", "cluster_id", "munis")
   WHERE (("cs"."role" = ANY (ARRAY['admin'::"text", 'provincial'::"text"])) OR (("cs"."role" = ANY (ARRAY['swoIII'::"text", 'swoII'::"text"])) AND ("cs"."cluster_id" = ( SELECT "m"."cluster_id"
            FROM "public"."municipality" "m"
-          WHERE ("m"."name" = "grantee_list"."municipality")))) OR (("cs"."role" = 'case_manager'::"text") AND ("grantee_list"."municipality" = ANY ("cs"."munis"))))))) WITH CHECK ((EXISTS ( SELECT 1
+          WHERE ("m"."name" = "grantee_list"."municipality")))) OR (("cs"."role" = ANY (ARRAY['case_manager'::"text", 'social_welfare_assistant'::"text"])) AND ("grantee_list"."municipality" = ANY ("cs"."munis"))))))) WITH CHECK ((EXISTS ( SELECT 1
    FROM "public"."current_scope"() "cs"("role", "cluster_id", "munis")
   WHERE (("cs"."role" = ANY (ARRAY['admin'::"text", 'provincial'::"text"])) OR (("cs"."role" = ANY (ARRAY['swoIII'::"text", 'swoII'::"text"])) AND ("cs"."cluster_id" = ( SELECT "m"."cluster_id"
            FROM "public"."municipality" "m"
-          WHERE ("m"."name" = "grantee_list"."municipality")))) OR (("cs"."role" = 'case_manager'::"text") AND ("grantee_list"."municipality" = ANY ("cs"."munis")))))));
+          WHERE ("m"."name" = "grantee_list"."municipality")))) OR (("cs"."role" = ANY (ARRAY['case_manager'::"text", 'social_welfare_assistant'::"text"])) AND ("grantee_list"."municipality" = ANY ("cs"."munis")))))));
 
 
 
@@ -1534,6 +1649,17 @@ CREATE POLICY "municipality read" ON "public"."municipality" FOR SELECT TO "auth
 
 
 
+ALTER TABLE "public"."notification_clear" ENABLE ROW LEVEL SECURITY;
+
+
+CREATE POLICY "notification_clear self read" ON "public"."notification_clear" FOR SELECT TO "authenticated" USING (("user_id" = "auth"."uid"()));
+
+
+
+CREATE POLICY "notification_clear self write" ON "public"."notification_clear" TO "authenticated" USING (("user_id" = "auth"."uid"())) WITH CHECK (("user_id" = "auth"."uid"()));
+
+
+
 ALTER TABLE "public"."registration_request" ENABLE ROW LEVEL SECURITY;
 
 
@@ -1583,9 +1709,9 @@ ALTER TABLE "public"."swdi_encoding" ENABLE ROW LEVEL SECURITY;
 
 CREATE POLICY "swdi_encoding scoped read" ON "public"."swdi_encoding" FOR SELECT TO "authenticated" USING ((EXISTS ( SELECT 1
    FROM "public"."current_scope"() "cs"("role", "cluster_id", "munis")
-  WHERE (("cs"."role" = ANY (ARRAY['admin'::"text", 'provincial'::"text"])) OR (("cs"."role" = ANY (ARRAY['swoIII'::"text", 'swoII'::"text"])) AND ("cs"."cluster_id" = ( SELECT "m"."cluster_id"
+  WHERE (("cs"."role" = ANY (ARRAY['admin'::"text", 'provincial'::"text", 'poo_staff'::"text"])) OR (("cs"."role" = ANY (ARRAY['swoIII'::"text", 'swoII'::"text"])) AND ("cs"."cluster_id" = ( SELECT "m"."cluster_id"
            FROM "public"."municipality" "m"
-          WHERE ("m"."name" = "swdi_encoding"."municipality")))) OR (("cs"."role" = 'case_manager'::"text") AND ("swdi_encoding"."municipality" = ANY ("cs"."munis")))))));
+          WHERE ("m"."name" = "swdi_encoding"."municipality")))) OR (("cs"."role" = ANY (ARRAY['case_manager'::"text", 'social_welfare_assistant'::"text"])) AND ("swdi_encoding"."municipality" = ANY ("cs"."munis")))))));
 
 
 
@@ -1602,9 +1728,9 @@ ALTER TABLE "public"."swdi_score" ENABLE ROW LEVEL SECURITY;
 
 CREATE POLICY "swdi_score scoped read" ON "public"."swdi_score" FOR SELECT TO "authenticated" USING ((EXISTS ( SELECT 1
    FROM "public"."current_scope"() "cs"("role", "cluster_id", "munis")
-  WHERE (("cs"."role" = ANY (ARRAY['admin'::"text", 'provincial'::"text"])) OR (("cs"."role" = ANY (ARRAY['swoIII'::"text", 'swoII'::"text"])) AND ("cs"."cluster_id" = ( SELECT "m"."cluster_id"
+  WHERE (("cs"."role" = ANY (ARRAY['admin'::"text", 'provincial'::"text", 'poo_staff'::"text"])) OR (("cs"."role" = ANY (ARRAY['swoIII'::"text", 'swoII'::"text"])) AND ("cs"."cluster_id" = ( SELECT "m"."cluster_id"
            FROM "public"."municipality" "m"
-          WHERE ("m"."name" = "swdi_score"."city_name")))) OR (("cs"."role" = 'case_manager'::"text") AND ("swdi_score"."city_name" = ANY ("cs"."munis")))))));
+          WHERE ("m"."name" = "swdi_score"."city_name")))) OR (("cs"."role" = ANY (ARRAY['case_manager'::"text", 'social_welfare_assistant'::"text"])) AND ("swdi_score"."city_name" = ANY ("cs"."munis")))))));
 
 
 
@@ -1616,12 +1742,39 @@ CREATE POLICY "swdi_score scoped write" ON "public"."swdi_score" TO "authenticat
 
 
 
+ALTER TABLE "public"."transfer_ack" ENABLE ROW LEVEL SECURITY;
+
+
+CREATE POLICY "transfer_ack self read" ON "public"."transfer_ack" FOR SELECT TO "authenticated" USING (("user_id" = "auth"."uid"()));
+
+
+
+CREATE POLICY "transfer_ack self write" ON "public"."transfer_ack" TO "authenticated" USING (("user_id" = "auth"."uid"())) WITH CHECK (("user_id" = "auth"."uid"()));
+
+
+
 
 
 ALTER PUBLICATION "supabase_realtime" OWNER TO "postgres";
 
 
 
+
+
+
+ALTER PUBLICATION "supabase_realtime" ADD TABLE ONLY "public"."case_list";
+
+
+
+ALTER PUBLICATION "supabase_realtime" ADD TABLE ONLY "public"."coa_entry";
+
+
+
+ALTER PUBLICATION "supabase_realtime" ADD TABLE ONLY "public"."grantee_transfer";
+
+
+
+ALTER PUBLICATION "supabase_realtime" ADD TABLE ONLY "public"."registration_request";
 
 
 
@@ -1835,6 +1988,12 @@ GRANT ALL ON FUNCTION "public"."case_typology_counts"("p_cluster" integer) TO "s
 
 
 
+GRANT ALL ON FUNCTION "public"."coa_caller_approves_cluster"("owner" "uuid") TO "anon";
+GRANT ALL ON FUNCTION "public"."coa_caller_approves_cluster"("owner" "uuid") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."coa_caller_approves_cluster"("owner" "uuid") TO "service_role";
+
+
+
 GRANT ALL ON FUNCTION "public"."coa_caller_is_elevated"() TO "anon";
 GRANT ALL ON FUNCTION "public"."coa_caller_is_elevated"() TO "authenticated";
 GRANT ALL ON FUNCTION "public"."coa_caller_is_elevated"() TO "service_role";
@@ -1847,9 +2006,21 @@ GRANT ALL ON FUNCTION "public"."coa_caller_supervises"("owner" "uuid") TO "servi
 
 
 
+GRANT ALL ON FUNCTION "public"."coa_caller_supervises_cluster"("owner" "uuid") TO "anon";
+GRANT ALL ON FUNCTION "public"."coa_caller_supervises_cluster"("owner" "uuid") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."coa_caller_supervises_cluster"("owner" "uuid") TO "service_role";
+
+
+
 GRANT ALL ON FUNCTION "public"."coa_entry_touch_updated_at"() TO "anon";
 GRANT ALL ON FUNCTION "public"."coa_entry_touch_updated_at"() TO "authenticated";
 GRANT ALL ON FUNCTION "public"."coa_entry_touch_updated_at"() TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."coa_mark_change_request_unseen"() TO "anon";
+GRANT ALL ON FUNCTION "public"."coa_mark_change_request_unseen"() TO "authenticated";
+GRANT ALL ON FUNCTION "public"."coa_mark_change_request_unseen"() TO "service_role";
 
 
 
@@ -2227,6 +2398,12 @@ GRANT ALL ON TABLE "public"."municipality" TO "service_role";
 
 
 
+GRANT ALL ON TABLE "public"."notification_clear" TO "anon";
+GRANT ALL ON TABLE "public"."notification_clear" TO "authenticated";
+GRANT ALL ON TABLE "public"."notification_clear" TO "service_role";
+
+
+
 GRANT ALL ON TABLE "public"."registration_request" TO "anon";
 GRANT ALL ON TABLE "public"."registration_request" TO "authenticated";
 GRANT ALL ON TABLE "public"."registration_request" TO "service_role";
@@ -2260,6 +2437,12 @@ GRANT ALL ON TABLE "public"."swdi_encoding" TO "service_role";
 GRANT ALL ON TABLE "public"."swdi_score" TO "anon";
 GRANT ALL ON TABLE "public"."swdi_score" TO "authenticated";
 GRANT ALL ON TABLE "public"."swdi_score" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."transfer_ack" TO "anon";
+GRANT ALL ON TABLE "public"."transfer_ack" TO "authenticated";
+GRANT ALL ON TABLE "public"."transfer_ack" TO "service_role";
 
 
 
