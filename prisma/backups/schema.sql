@@ -273,6 +273,102 @@ $$;
 ALTER FUNCTION "public"."current_scope"() OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."dashboard_municipality_metrics"("p_cluster" integer DEFAULT NULL::integer) RETURNS TABLE("municipality" "text", "total_hh" bigint, "active_hh" bigint, "ip_hh" bigint, "child_hh" bigint, "open_cases" bigint)
+    LANGUAGE "sql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'public'
+    AS $$
+  with g as (
+    select
+      coalesce(nullif(trim(grantee_list.municipality), ''), '—') as municipality,
+      count(*)::bigint as total_hh,
+      count(*) filter (where status ilike '1 - active')::bigint as active_hh,
+      count(*) filter (
+        where status ilike '1 - active'
+          and ip_affiliation is not null and ip_affiliation <> ''
+      )::bigint as ip_hh,
+      count(*) filter (
+        where status ilike '1 - active'
+          and birthday > (current_date - interval '18 years')
+      )::bigint as child_hh
+    from public.grantee_list
+    where p_cluster is null
+       or grantee_list.municipality in (
+            select name from public.municipality where cluster_id = p_cluster
+          )
+    group by 1
+  ),
+  c as (
+    select
+      coalesce(nullif(trim(case_list.municipality), ''), '—') as municipality,
+      count(*)::bigint as open_cases
+    from public.case_list
+    where (status is null or status not ilike '%closed%')
+      and (
+        p_cluster is null
+        or case_list.municipality in (
+             select name from public.municipality where cluster_id = p_cluster
+           )
+      )
+    group by 1
+  )
+  select
+    coalesce(g.municipality, c.municipality) as municipality,
+    coalesce(g.total_hh, 0)   as total_hh,
+    coalesce(g.active_hh, 0)  as active_hh,
+    coalesce(g.ip_hh, 0)      as ip_hh,
+    coalesce(g.child_hh, 0)   as child_hh,
+    coalesce(c.open_cases, 0) as open_cases
+  from g
+  full outer join c on g.municipality = c.municipality;
+$$;
+
+
+ALTER FUNCTION "public"."dashboard_municipality_metrics"("p_cluster" integer) OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."grantee_active_demographics"("p_cluster" integer DEFAULT NULL::integer) RETURNS TABLE("dim" "text", "label" "text", "cnt" bigint)
+    LANGUAGE "sql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'public'
+    AS $$
+  with active as (
+    select sex, birthday
+    from public.grantee_list
+    where status ilike '1 - active'
+      and (
+        p_cluster is null
+        or municipality in (select name from public.municipality where cluster_id = p_cluster)
+      )
+  )
+  select 'sex' as dim,
+         case
+           when lower(trim(sex)) in ('m', 'male') then 'Male'
+           when lower(trim(sex)) in ('f', 'female') then 'Female'
+           else 'Unknown'
+         end as label,
+         count(*)::bigint as cnt
+  from active
+  group by 2
+
+  union all
+
+  select 'age' as dim,
+         case
+           when birthday is null then 'Unknown'
+           when extract(year from age(birthday)) < 18 then '<18'
+           when extract(year from age(birthday)) <= 30 then '18-30'
+           when extract(year from age(birthday)) <= 45 then '31-45'
+           when extract(year from age(birthday)) <= 59 then '46-59'
+           else '60+'
+         end as label,
+         count(*)::bigint as cnt
+  from active
+  group by 2;
+$$;
+
+
+ALTER FUNCTION "public"."grantee_active_demographics"("p_cluster" integer) OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."grantee_municipality_counts"("p_cluster" integer DEFAULT NULL::integer) RETURNS TABLE("label" "text", "cnt" bigint)
     LANGUAGE "sql" STABLE SECURITY DEFINER
     SET "search_path" TO 'public'
@@ -1523,9 +1619,9 @@ ALTER TABLE "public"."case_list" ENABLE ROW LEVEL SECURITY;
 
 CREATE POLICY "case_list scoped read" ON "public"."case_list" FOR SELECT TO "authenticated" USING ((EXISTS ( SELECT 1
    FROM "public"."current_scope"() "cs"("role", "cluster_id", "munis")
-  WHERE (("cs"."role" = ANY (ARRAY['admin'::"text", 'provincial'::"text", 'poo_staff'::"text"])) OR (("cs"."role" = ANY (ARRAY['swoIII'::"text", 'swoII'::"text"])) AND ("cs"."cluster_id" = ( SELECT "m"."cluster_id"
+  WHERE (("cs"."role" = ANY (ARRAY['admin'::"text", 'provincial'::"text"])) OR (("cs"."role" = ANY (ARRAY['swoIII'::"text", 'swoII'::"text"])) AND ("cs"."cluster_id" = ( SELECT "m"."cluster_id"
            FROM "public"."municipality" "m"
-          WHERE ("m"."name" = "public"."case_list_municipality"("case_list"."hh_id", "case_list"."municipality"))))) OR (("cs"."role" = ANY (ARRAY['case_manager'::"text", 'social_welfare_assistant'::"text"])) AND ("public"."case_list_municipality"("case_list"."hh_id", "case_list"."municipality") = ANY ("cs"."munis")))))));
+          WHERE ("m"."name" = "public"."case_list_municipality"("case_list"."hh_id", "case_list"."municipality"))))) OR (("cs"."role" = 'case_manager'::"text") AND ("public"."case_list_municipality"("case_list"."hh_id", "case_list"."municipality") = ANY ("cs"."munis")))))));
 
 
 
@@ -1533,11 +1629,11 @@ CREATE POLICY "case_list scoped write" ON "public"."case_list" TO "authenticated
    FROM "public"."current_scope"() "cs"("role", "cluster_id", "munis")
   WHERE (("cs"."role" = ANY (ARRAY['admin'::"text", 'provincial'::"text"])) OR (("cs"."role" = ANY (ARRAY['swoIII'::"text", 'swoII'::"text"])) AND ("cs"."cluster_id" = ( SELECT "m"."cluster_id"
            FROM "public"."municipality" "m"
-          WHERE ("m"."name" = "public"."case_list_municipality"("case_list"."hh_id", "case_list"."municipality"))))) OR (("cs"."role" = ANY (ARRAY['case_manager'::"text", 'social_welfare_assistant'::"text"])) AND ("public"."case_list_municipality"("case_list"."hh_id", "case_list"."municipality") = ANY ("cs"."munis"))))))) WITH CHECK ((EXISTS ( SELECT 1
+          WHERE ("m"."name" = "public"."case_list_municipality"("case_list"."hh_id", "case_list"."municipality"))))) OR (("cs"."role" = 'case_manager'::"text") AND ("public"."case_list_municipality"("case_list"."hh_id", "case_list"."municipality") = ANY ("cs"."munis"))))))) WITH CHECK ((EXISTS ( SELECT 1
    FROM "public"."current_scope"() "cs"("role", "cluster_id", "munis")
   WHERE (("cs"."role" = ANY (ARRAY['admin'::"text", 'provincial'::"text"])) OR (("cs"."role" = ANY (ARRAY['swoIII'::"text", 'swoII'::"text"])) AND ("cs"."cluster_id" = ( SELECT "m"."cluster_id"
            FROM "public"."municipality" "m"
-          WHERE ("m"."name" = "public"."case_list_municipality"("case_list"."hh_id", "case_list"."municipality"))))) OR (("cs"."role" = ANY (ARRAY['case_manager'::"text", 'social_welfare_assistant'::"text"])) AND ("public"."case_list_municipality"("case_list"."hh_id", "case_list"."municipality") = ANY ("cs"."munis")))))));
+          WHERE ("m"."name" = "public"."case_list_municipality"("case_list"."hh_id", "case_list"."municipality"))))) OR (("cs"."role" = 'case_manager'::"text") AND ("public"."case_list_municipality"("case_list"."hh_id", "case_list"."municipality") = ANY ("cs"."munis")))))));
 
 
 
@@ -1771,6 +1867,10 @@ ALTER PUBLICATION "supabase_realtime" ADD TABLE ONLY "public"."coa_entry";
 
 
 ALTER PUBLICATION "supabase_realtime" ADD TABLE ONLY "public"."grantee_transfer";
+
+
+
+ALTER PUBLICATION "supabase_realtime" ADD TABLE ONLY "public"."monitor_row";
 
 
 
@@ -2030,6 +2130,12 @@ GRANT ALL ON FUNCTION "public"."current_scope"() TO "service_role";
 
 
 
+GRANT ALL ON FUNCTION "public"."dashboard_municipality_metrics"("p_cluster" integer) TO "anon";
+GRANT ALL ON FUNCTION "public"."dashboard_municipality_metrics"("p_cluster" integer) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."dashboard_municipality_metrics"("p_cluster" integer) TO "service_role";
+
+
+
 GRANT ALL ON FUNCTION "public"."gin_extract_query_trgm"("text", "internal", smallint, "internal", "internal", "internal", "internal") TO "postgres";
 GRANT ALL ON FUNCTION "public"."gin_extract_query_trgm"("text", "internal", smallint, "internal", "internal", "internal", "internal") TO "anon";
 GRANT ALL ON FUNCTION "public"."gin_extract_query_trgm"("text", "internal", smallint, "internal", "internal", "internal", "internal") TO "authenticated";
@@ -2055,6 +2161,12 @@ GRANT ALL ON FUNCTION "public"."gin_trgm_triconsistent"("internal", smallint, "t
 GRANT ALL ON FUNCTION "public"."gin_trgm_triconsistent"("internal", smallint, "text", integer, "internal", "internal", "internal") TO "anon";
 GRANT ALL ON FUNCTION "public"."gin_trgm_triconsistent"("internal", smallint, "text", integer, "internal", "internal", "internal") TO "authenticated";
 GRANT ALL ON FUNCTION "public"."gin_trgm_triconsistent"("internal", smallint, "text", integer, "internal", "internal", "internal") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."grantee_active_demographics"("p_cluster" integer) TO "anon";
+GRANT ALL ON FUNCTION "public"."grantee_active_demographics"("p_cluster" integer) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."grantee_active_demographics"("p_cluster" integer) TO "service_role";
 
 
 
