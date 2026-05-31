@@ -273,23 +273,29 @@ $$;
 ALTER FUNCTION "public"."current_scope"() OWNER TO "postgres";
 
 
-CREATE OR REPLACE FUNCTION "public"."dashboard_municipality_metrics"("p_cluster" integer DEFAULT NULL::integer) RETURNS TABLE("municipality" "text", "total_hh" bigint, "active_hh" bigint, "ip_hh" bigint, "child_hh" bigint, "open_cases" bigint)
+CREATE OR REPLACE FUNCTION "public"."dashboard_municipality_metrics"("p_cluster" integer DEFAULT NULL::integer) RETURNS TABLE("municipality" "text", "active_hh" bigint, "open_cases" bigint, "closed_cases" bigint, "lhf_hh" bigint, "ip_total" bigint, "ip_active" bigint, "child_total" bigint, "child_active" bigint)
     LANGUAGE "sql" STABLE SECURITY DEFINER
     SET "search_path" TO 'public'
     AS $$
   with g as (
     select
       coalesce(nullif(trim(grantee_list.municipality), ''), '—') as municipality,
-      count(*)::bigint as total_hh,
       count(*) filter (where status ilike '1 - active')::bigint as active_hh,
+      count(*) filter (where lhf = true)::bigint as lhf_hh,
+      count(*) filter (
+        where ip_affiliation is not null and ip_affiliation <> ''
+      )::bigint as ip_total,
       count(*) filter (
         where status ilike '1 - active'
           and ip_affiliation is not null and ip_affiliation <> ''
-      )::bigint as ip_hh,
+      )::bigint as ip_active,
+      count(*) filter (
+        where birthday > (current_date - interval '18 years')
+      )::bigint as child_total,
       count(*) filter (
         where status ilike '1 - active'
           and birthday > (current_date - interval '18 years')
-      )::bigint as child_hh
+      )::bigint as child_active
     from public.grantee_list
     where p_cluster is null
        or grantee_list.municipality in (
@@ -300,24 +306,25 @@ CREATE OR REPLACE FUNCTION "public"."dashboard_municipality_metrics"("p_cluster"
   c as (
     select
       coalesce(nullif(trim(case_list.municipality), ''), '—') as municipality,
-      count(*)::bigint as open_cases
+      count(*) filter (where status not ilike '%closed%' or status is null)::bigint as open_cases,
+      count(*) filter (where status ilike '%closed%')::bigint as closed_cases
     from public.case_list
-    where (status is null or status not ilike '%closed%')
-      and (
-        p_cluster is null
-        or case_list.municipality in (
-             select name from public.municipality where cluster_id = p_cluster
-           )
-      )
+    where p_cluster is null
+       or case_list.municipality in (
+            select name from public.municipality where cluster_id = p_cluster
+          )
     group by 1
   )
   select
     coalesce(g.municipality, c.municipality) as municipality,
-    coalesce(g.total_hh, 0)   as total_hh,
-    coalesce(g.active_hh, 0)  as active_hh,
-    coalesce(g.ip_hh, 0)      as ip_hh,
-    coalesce(g.child_hh, 0)   as child_hh,
-    coalesce(c.open_cases, 0) as open_cases
+    coalesce(g.active_hh, 0)    as active_hh,
+    coalesce(c.open_cases, 0)   as open_cases,
+    coalesce(c.closed_cases, 0) as closed_cases,
+    coalesce(g.lhf_hh, 0)       as lhf_hh,
+    coalesce(g.ip_total, 0)     as ip_total,
+    coalesce(g.ip_active, 0)    as ip_active,
+    coalesce(g.child_total, 0)  as child_total,
+    coalesce(g.child_active, 0) as child_active
   from g
   full outer join c on g.municipality = c.municipality;
 $$;
