@@ -511,6 +511,53 @@ $$;
 
 ALTER FUNCTION "public"."staff_directory_touch_updated_at"() OWNER TO "postgres";
 
+
+CREATE OR REPLACE FUNCTION "public"."swdi_gap_counts"("p_munis" "text"[] DEFAULT NULL::"text"[]) RETURNS TABLE("key" "text", "lvl1" bigint, "lvl2" bigint, "assessed" bigint)
+    LANGUAGE "sql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'public'
+    AS $$
+  with s as (
+    select
+      sw.sa1, sw.sa2, sw.sa3, sw.sa4, sw.sa5,
+      sw.es1, sw.es2, sw.es3, sw.es4,
+      sw.hcs1, sw.hcs2,
+      sw.nc1, sw.nc2,
+      sw.wcs1, sw.wcs2, sw.wcs3,
+      sw.hc1, sw.hc2, sw.hc3, sw.hc4,
+      sw.ec1, sw.ec2,
+      sw.rp1, sw.rp2, sw.rp3,
+      sw.fa1, sw.fa2, sw.fa3
+    from public.swdi_score sw
+    join public.grantee_list g on g.hh_id = sw.hh_id
+    where p_munis is null or g.municipality = any(p_munis)
+  ),
+  unp as (
+    select t.key, t.v
+    from s,
+    lateral (values
+      ('sa1', s.sa1), ('sa2', s.sa2), ('sa3', s.sa3), ('sa4', s.sa4), ('sa5', s.sa5),
+      ('es1', s.es1), ('es2', s.es2), ('es3', s.es3), ('es4', s.es4),
+      ('hcs1', s.hcs1), ('hcs2', s.hcs2),
+      ('nc1', s.nc1), ('nc2', s.nc2),
+      ('wcs1', s.wcs1), ('wcs2', s.wcs2), ('wcs3', s.wcs3),
+      ('hc1', s.hc1), ('hc2', s.hc2), ('hc3', s.hc3), ('hc4', s.hc4),
+      ('ec1', s.ec1), ('ec2', s.ec2),
+      ('rp1', s.rp1), ('rp2', s.rp2), ('rp3', s.rp3),
+      ('fa1', s.fa1), ('fa2', s.fa2), ('fa3', s.fa3)
+    ) as t(key, v)
+  )
+  select
+    key,
+    count(*) filter (where v is not null and v > 0 and v < 1.5)::bigint as lvl1,
+    count(*) filter (where v is not null and v >= 1.5 and v < 2.5)::bigint as lvl2,
+    count(*) filter (where v is not null and v > 0)::bigint as assessed
+  from unp
+  group by key;
+$$;
+
+
+ALTER FUNCTION "public"."swdi_gap_counts"("p_munis" "text"[]) OWNER TO "postgres";
+
 SET default_tablespace = '';
 
 SET default_table_access_method = "heap";
@@ -1259,11 +1306,23 @@ CREATE INDEX "case_list_assigned_case_manager_idx" ON "public"."case_list" USING
 
 
 
+CREATE INDEX "case_list_assigned_case_manager_trgm_idx" ON "public"."case_list" USING "gin" ("assigned_case_manager" "public"."gin_trgm_ops");
+
+
+
+CREATE INDEX "case_list_client_name_trgm_idx" ON "public"."case_list" USING "gin" ("client_name" "public"."gin_trgm_ops");
+
+
+
 CREATE INDEX "case_list_date_encoded_idx" ON "public"."case_list" USING "btree" ("date_encoded");
 
 
 
 CREATE INDEX "case_list_hh_id_idx" ON "public"."case_list" USING "btree" ("hh_id");
+
+
+
+CREATE INDEX "case_list_hh_id_trgm_idx" ON "public"."case_list" USING "gin" ("hh_id" "public"."gin_trgm_ops");
 
 
 
@@ -1280,6 +1339,10 @@ CREATE INDEX "case_list_muni_date_idx" ON "public"."case_list" USING "btree" ("m
 
 
 CREATE INDEX "case_list_municipality_idx" ON "public"."case_list" USING "btree" ("municipality");
+
+
+
+CREATE INDEX "case_list_record_no_trgm_idx" ON "public"."case_list" USING "gin" ("record_no" "public"."gin_trgm_ops");
 
 
 
@@ -1300,6 +1363,10 @@ CREATE INDEX "case_list_typology_category_idx" ON "public"."case_list" USING "bt
 
 
 CREATE INDEX "case_list_typology_name_idx" ON "public"."case_list" USING "btree" ("typology_name");
+
+
+
+CREATE INDEX "case_list_typology_name_trgm_idx" ON "public"."case_list" USING "gin" ("typology_name" "public"."gin_trgm_ops");
 
 
 
@@ -1327,7 +1394,19 @@ CREATE INDEX "grantee_list_barangay_idx" ON "public"."grantee_list" USING "btree
 
 
 
+CREATE INDEX "grantee_list_barangay_trgm_idx" ON "public"."grantee_list" USING "gin" ("barangay" "public"."gin_trgm_ops");
+
+
+
 CREATE INDEX "grantee_list_entry_id_idx" ON "public"."grantee_list" USING "btree" ("entry_id");
+
+
+
+CREATE INDEX "grantee_list_grantee_name_trgm_idx" ON "public"."grantee_list" USING "gin" ("grantee_name" "public"."gin_trgm_ops");
+
+
+
+CREATE INDEX "grantee_list_hh_id_trgm_idx" ON "public"."grantee_list" USING "gin" ("hh_id" "public"."gin_trgm_ops");
 
 
 
@@ -1344,6 +1423,10 @@ CREATE INDEX "grantee_list_muni_status_idx" ON "public"."grantee_list" USING "bt
 
 
 CREATE INDEX "grantee_list_municipality_idx" ON "public"."grantee_list" USING "btree" ("municipality");
+
+
+
+CREATE INDEX "grantee_list_municipality_trgm_idx" ON "public"."grantee_list" USING "gin" ("municipality" "public"."gin_trgm_ops");
 
 
 
@@ -2362,6 +2445,12 @@ GRANT ALL ON FUNCTION "public"."strict_word_similarity_op"("text", "text") TO "p
 GRANT ALL ON FUNCTION "public"."strict_word_similarity_op"("text", "text") TO "anon";
 GRANT ALL ON FUNCTION "public"."strict_word_similarity_op"("text", "text") TO "authenticated";
 GRANT ALL ON FUNCTION "public"."strict_word_similarity_op"("text", "text") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."swdi_gap_counts"("p_munis" "text"[]) TO "anon";
+GRANT ALL ON FUNCTION "public"."swdi_gap_counts"("p_munis" "text"[]) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."swdi_gap_counts"("p_munis" "text"[]) TO "service_role";
 
 
 
