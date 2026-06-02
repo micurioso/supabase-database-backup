@@ -819,6 +819,20 @@ CREATE TABLE IF NOT EXISTS "public"."grantee_transfer" (
 ALTER TABLE "public"."grantee_transfer" OWNER TO "postgres";
 
 
+CREATE TABLE IF NOT EXISTS "public"."import_log" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "kind" "text" NOT NULL,
+    "imported_by" "uuid",
+    "imported_by_name" "text",
+    "imported_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "filename" "text",
+    "row_count" integer
+);
+
+
+ALTER TABLE "public"."import_log" OWNER TO "postgres";
+
+
 CREATE TABLE IF NOT EXISTS "public"."monitor" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "slug" "text" NOT NULL,
@@ -834,7 +848,9 @@ CREATE TABLE IF NOT EXISTS "public"."monitor" (
     "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "sidebar_group" "text",
-    "sidebar_icon" "text"
+    "sidebar_icon" "text",
+    "gsheet_id" "text",
+    "gsheet_tab" "text"
 );
 
 
@@ -1221,6 +1237,11 @@ ALTER TABLE ONLY "public"."grantee_transfer"
 
 
 
+ALTER TABLE ONLY "public"."import_log"
+    ADD CONSTRAINT "import_log_pkey" PRIMARY KEY ("id");
+
+
+
 ALTER TABLE ONLY "public"."monitor"
     ADD CONSTRAINT "monitor_pkey" PRIMARY KEY ("id");
 
@@ -1454,6 +1475,10 @@ CREATE INDEX "grantee_transfer_hh_id_idx" ON "public"."grantee_transfer" USING "
 
 
 
+CREATE INDEX "import_log_imported_at_idx" ON "public"."import_log" USING "btree" ("imported_at" DESC);
+
+
+
 CREATE INDEX "monitor_row_monitor_idx" ON "public"."monitor_row" USING "btree" ("monitor_id");
 
 
@@ -1587,6 +1612,11 @@ ALTER TABLE ONLY "public"."grantee_import_batch"
 
 ALTER TABLE ONLY "public"."grantee_transfer"
     ADD CONSTRAINT "grantee_transfer_batch_id_fkey" FOREIGN KEY ("batch_id") REFERENCES "public"."grantee_import_batch"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."import_log"
+    ADD CONSTRAINT "import_log_imported_by_fkey" FOREIGN KEY ("imported_by") REFERENCES "auth"."users"("id") ON DELETE SET NULL;
 
 
 
@@ -1787,6 +1817,17 @@ ALTER TABLE "public"."grantee_transfer" ENABLE ROW LEVEL SECURITY;
 
 
 CREATE POLICY "grantee_transfer authenticated all" ON "public"."grantee_transfer" TO "authenticated" USING (true) WITH CHECK (true);
+
+
+
+ALTER TABLE "public"."import_log" ENABLE ROW LEVEL SECURITY;
+
+
+CREATE POLICY "import_log authenticated insert" ON "public"."import_log" FOR INSERT TO "authenticated" WITH CHECK (true);
+
+
+
+CREATE POLICY "import_log authenticated read" ON "public"."import_log" FOR SELECT TO "authenticated" USING (true);
 
 
 
@@ -2585,6 +2626,12 @@ GRANT ALL ON TABLE "public"."grantee_status_options" TO "service_role";
 GRANT ALL ON TABLE "public"."grantee_transfer" TO "anon";
 GRANT ALL ON TABLE "public"."grantee_transfer" TO "authenticated";
 GRANT ALL ON TABLE "public"."grantee_transfer" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."import_log" TO "anon";
+GRANT ALL ON TABLE "public"."import_log" TO "authenticated";
+GRANT ALL ON TABLE "public"."import_log" TO "service_role";
 
 
 
