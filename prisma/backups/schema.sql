@@ -850,7 +850,9 @@ CREATE TABLE IF NOT EXISTS "public"."monitor" (
     "sidebar_group" "text",
     "sidebar_icon" "text",
     "gsheet_id" "text",
-    "gsheet_tab" "text"
+    "gsheet_tab" "text",
+    "status" "text" DEFAULT 'open'::"text" NOT NULL,
+    CONSTRAINT "monitor_status_check" CHECK (("status" = ANY (ARRAY['open'::"text", 'sealed'::"text", 'hidden'::"text"])))
 );
 
 
