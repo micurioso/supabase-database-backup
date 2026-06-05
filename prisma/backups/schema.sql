@@ -901,7 +901,7 @@ CREATE TABLE IF NOT EXISTS "public"."registration_request" (
     "first_name" "text" NOT NULL,
     "middle_name" "text",
     "last_name" "text" NOT NULL,
-    "municipality" "text" NOT NULL,
+    "municipality" "text",
     "status" "text" DEFAULT 'pending'::"text" NOT NULL,
     "reviewed_by" "uuid",
     "reviewed_at" timestamp with time zone,
