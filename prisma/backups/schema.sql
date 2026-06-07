@@ -52,67 +52,6 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp" WITH SCHEMA "extensions";
 
 
 
-CREATE OR REPLACE FUNCTION "public"."bdm_pcn_caller_can_delete"() RETURNS boolean
-    LANGUAGE "sql" STABLE SECURITY DEFINER
-    SET "search_path" TO 'public'
-    AS $$
-  select exists (
-    select 1 from public.staff
-    where user_id = auth.uid()
-      and role in ('admin','provincial')
-  );
-$$;
-
-
-ALTER FUNCTION "public"."bdm_pcn_caller_can_delete"() OWNER TO "postgres";
-
-
-CREATE OR REPLACE FUNCTION "public"."bdm_pcn_caller_can_edit_muni"("target_muni" "text") RETURNS boolean
-    LANGUAGE "sql" STABLE SECURITY DEFINER
-    SET "search_path" TO 'public'
-    AS $$
-  select case
-    when target_muni is null then false
-    else exists (
-      select 1 from public.staff_municipality
-      where user_id = auth.uid()
-        and municipality = target_muni
-    )
-  end;
-$$;
-
-
-ALTER FUNCTION "public"."bdm_pcn_caller_can_edit_muni"("target_muni" "text") OWNER TO "postgres";
-
-
-CREATE OR REPLACE FUNCTION "public"."bdm_pcn_caller_is_editor"() RETURNS boolean
-    LANGUAGE "sql" STABLE SECURITY DEFINER
-    SET "search_path" TO 'public'
-    AS $$
-  select exists (
-    select 1 from public.staff
-    where user_id = auth.uid()
-      and role in ('admin','provincial','swoIII','swoII')
-  );
-$$;
-
-
-ALTER FUNCTION "public"."bdm_pcn_caller_is_editor"() OWNER TO "postgres";
-
-
-CREATE OR REPLACE FUNCTION "public"."bdm_pcn_target_touch"() RETURNS "trigger"
-    LANGUAGE "plpgsql"
-    AS $$
-begin
-  new.updated_at := now();
-  return new;
-end;
-$$;
-
-
-ALTER FUNCTION "public"."bdm_pcn_target_touch"() OWNER TO "postgres";
-
-
 CREATE OR REPLACE FUNCTION "public"."case_list_municipality"("p_hh_id" "text", "p_muni" "text") RETURNS "text"
     LANGUAGE "sql" STABLE
     AS $$
@@ -155,105 +94,6 @@ $$;
 
 
 ALTER FUNCTION "public"."case_typology_counts"("p_cluster" integer) OWNER TO "postgres";
-
-
-CREATE OR REPLACE FUNCTION "public"."coa_caller_approves_cluster"("owner" "uuid") RETURNS boolean
-    LANGUAGE "sql" STABLE SECURITY DEFINER
-    SET "search_path" TO 'public'
-    AS $$
-  select exists (
-    select 1
-    from public.staff me
-    join public.staff owner_s on owner_s.user_id = owner
-    where me.user_id = auth.uid()
-      and me.role = 'swoIII'
-      and me.cluster_id is not null
-      and owner_s.role in ('case_manager','social_welfare_assistant')
-      and owner_s.cluster_id = me.cluster_id
-  );
-$$;
-
-
-ALTER FUNCTION "public"."coa_caller_approves_cluster"("owner" "uuid") OWNER TO "postgres";
-
-
-CREATE OR REPLACE FUNCTION "public"."coa_caller_is_elevated"() RETURNS boolean
-    LANGUAGE "sql" STABLE SECURITY DEFINER
-    SET "search_path" TO 'public'
-    AS $$
-  select exists (
-    select 1 from public.staff
-    where user_id = auth.uid()
-      and role in ('admin','provincial')
-  );
-$$;
-
-
-ALTER FUNCTION "public"."coa_caller_is_elevated"() OWNER TO "postgres";
-
-
-CREATE OR REPLACE FUNCTION "public"."coa_caller_supervises"("owner" "uuid") RETURNS boolean
-    LANGUAGE "sql" STABLE SECURITY DEFINER
-    SET "search_path" TO 'public'
-    AS $$
-  select exists (
-    select 1 from public.staff
-    where user_id = owner
-      and supervisor_user_id = auth.uid()
-  );
-$$;
-
-
-ALTER FUNCTION "public"."coa_caller_supervises"("owner" "uuid") OWNER TO "postgres";
-
-
-CREATE OR REPLACE FUNCTION "public"."coa_caller_supervises_cluster"("owner" "uuid") RETURNS boolean
-    LANGUAGE "sql" STABLE SECURITY DEFINER
-    SET "search_path" TO 'public'
-    AS $$
-  select exists (
-    select 1
-    from public.staff me
-    join public.staff owner_s on owner_s.user_id = owner
-    where me.user_id = auth.uid()
-      and me.role in ('swoIII','swoII')
-      and me.cluster_id is not null
-      and owner_s.role in ('case_manager','social_welfare_assistant')
-      and owner_s.cluster_id = me.cluster_id
-  );
-$$;
-
-
-ALTER FUNCTION "public"."coa_caller_supervises_cluster"("owner" "uuid") OWNER TO "postgres";
-
-
-CREATE OR REPLACE FUNCTION "public"."coa_entry_touch_updated_at"() RETURNS "trigger"
-    LANGUAGE "plpgsql"
-    AS $$
-begin
-  new.updated_at = now();
-  return new;
-end;
-$$;
-
-
-ALTER FUNCTION "public"."coa_entry_touch_updated_at"() OWNER TO "postgres";
-
-
-CREATE OR REPLACE FUNCTION "public"."coa_mark_change_request_unseen"() RETURNS "trigger"
-    LANGUAGE "plpgsql"
-    AS $$
-begin
-  if OLD.change_request_status = 'pending'
-     and NEW.change_request_status in ('approved', 'denied') then
-    new.change_request_seen := false;
-  end if;
-  return new;
-end;
-$$;
-
-
-ALTER FUNCTION "public"."coa_mark_change_request_unseen"() OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "public"."current_scope"() RETURNS TABLE("role" "text", "cluster_id" integer, "munis" "text"[])
@@ -605,40 +445,6 @@ CREATE OR REPLACE VIEW "public"."barangay_options" AS
 ALTER VIEW "public"."barangay_options" OWNER TO "postgres";
 
 
-CREATE TABLE IF NOT EXISTS "public"."bdm_pcn_target" (
-    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
-    "entry_id" "text" NOT NULL,
-    "hh_id" "text",
-    "region" "text",
-    "province" "text",
-    "municipality" "text",
-    "barangay" "text",
-    "last_name" "text",
-    "first_name" "text",
-    "middle_name" "text",
-    "ext_name" "text",
-    "birthday" "date",
-    "age" integer,
-    "sex" "text",
-    "relation_to_hh_head" "text",
-    "with_pcn" "text",
-    "pcn16" "text",
-    "trn29" "text",
-    "client_status" "text",
-    "member_status" "text",
-    "encoded_by" "uuid",
-    "encoded_at" timestamp with time zone,
-    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
-    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
-    CONSTRAINT "bdm_pcn_target_pcn16_check" CHECK ((("pcn16" IS NULL) OR ("pcn16" ~ '^[0-9]{16}$'::"text"))),
-    CONSTRAINT "bdm_pcn_target_trn29_check" CHECK ((("trn29" IS NULL) OR ("trn29" ~ '^[0-9]{29}$'::"text"))),
-    CONSTRAINT "bdm_pcn_target_with_pcn_check" CHECK (("with_pcn" = ANY (ARRAY['yes'::"text", 'no'::"text"])))
-);
-
-
-ALTER TABLE "public"."bdm_pcn_target" OWNER TO "postgres";
-
-
 CREATE TABLE IF NOT EXISTS "public"."case_list" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "record_no" "text",
@@ -739,40 +545,6 @@ CREATE TABLE IF NOT EXISTS "public"."cluster" (
 
 
 ALTER TABLE "public"."cluster" OWNER TO "postgres";
-
-
-CREATE TABLE IF NOT EXISTS "public"."coa_entry" (
-    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
-    "user_id" "uuid" NOT NULL,
-    "entry_date" "date" NOT NULL,
-    "presence" "text" DEFAULT 'office'::"text" NOT NULL,
-    "activity" "text",
-    "expected_output" "text",
-    "location" "text",
-    "remarks" "text",
-    "change_request" "text",
-    "change_request_status" "text" DEFAULT 'none'::"text" NOT NULL,
-    "actual_accomplishment" "text",
-    "rating_ef" smallint,
-    "rating_ql" smallint,
-    "rating_t" smallint,
-    "approval_status" "text" DEFAULT 'draft'::"text" NOT NULL,
-    "approved_by" "uuid",
-    "approved_at" timestamp with time zone,
-    "approval_remarks" "text",
-    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
-    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
-    "change_request_seen" boolean DEFAULT true NOT NULL,
-    CONSTRAINT "coa_entry_approval_status_check" CHECK (("approval_status" = ANY (ARRAY['draft'::"text", 'submitted'::"text", 'approved'::"text", 'disapproved'::"text"]))),
-    CONSTRAINT "coa_entry_change_request_status_check" CHECK (("change_request_status" = ANY (ARRAY['none'::"text", 'pending'::"text", 'approved'::"text", 'denied'::"text"]))),
-    CONSTRAINT "coa_entry_presence_check" CHECK (("presence" = ANY (ARRAY['office'::"text", 'field'::"text", 'leave'::"text", 'holiday'::"text"]))),
-    CONSTRAINT "coa_entry_rating_ef_check" CHECK ((("rating_ef" >= 1) AND ("rating_ef" <= 5))),
-    CONSTRAINT "coa_entry_rating_ql_check" CHECK ((("rating_ql" >= 1) AND ("rating_ql" <= 5))),
-    CONSTRAINT "coa_entry_rating_t_check" CHECK ((("rating_t" >= 1) AND ("rating_t" <= 5)))
-);
-
-
-ALTER TABLE "public"."coa_entry" OWNER TO "postgres";
 
 
 CREATE TABLE IF NOT EXISTS "public"."grantee_import_batch" (
@@ -1179,16 +951,6 @@ CREATE OR REPLACE VIEW "public"."v_grantee_list" WITH ("security_invoker"='on') 
 ALTER VIEW "public"."v_grantee_list" OWNER TO "postgres";
 
 
-ALTER TABLE ONLY "public"."bdm_pcn_target"
-    ADD CONSTRAINT "bdm_pcn_target_entry_id_key" UNIQUE ("entry_id");
-
-
-
-ALTER TABLE ONLY "public"."bdm_pcn_target"
-    ADD CONSTRAINT "bdm_pcn_target_pkey" PRIMARY KEY ("id");
-
-
-
 ALTER TABLE ONLY "public"."case_list"
     ADD CONSTRAINT "case_list_pkey" PRIMARY KEY ("id");
 
@@ -1206,16 +968,6 @@ ALTER TABLE ONLY "public"."cluster"
 
 ALTER TABLE ONLY "public"."cluster"
     ADD CONSTRAINT "cluster_pkey" PRIMARY KEY ("id");
-
-
-
-ALTER TABLE ONLY "public"."coa_entry"
-    ADD CONSTRAINT "coa_entry_pkey" PRIMARY KEY ("id");
-
-
-
-ALTER TABLE ONLY "public"."coa_entry"
-    ADD CONSTRAINT "coa_entry_user_id_entry_date_key" UNIQUE ("user_id", "entry_date");
 
 
 
@@ -1309,18 +1061,6 @@ ALTER TABLE ONLY "public"."transfer_ack"
 
 
 
-CREATE INDEX "bdm_pcn_target_hh_id_idx" ON "public"."bdm_pcn_target" USING "btree" ("hh_id");
-
-
-
-CREATE INDEX "bdm_pcn_target_muni_idx" ON "public"."bdm_pcn_target" USING "btree" ("municipality");
-
-
-
-CREATE INDEX "bdm_pcn_target_with_pcn_idx" ON "public"."bdm_pcn_target" USING "btree" ("with_pcn");
-
-
-
 CREATE INDEX "case_list_approval_status_idx" ON "public"."case_list" USING "btree" ("approval_status");
 
 
@@ -1361,10 +1101,6 @@ CREATE INDEX "case_list_muni_date_idx" ON "public"."case_list" USING "btree" ("m
 
 
 
-CREATE INDEX "case_list_municipality_idx" ON "public"."case_list" USING "btree" ("municipality");
-
-
-
 CREATE INDEX "case_list_record_no_trgm_idx" ON "public"."case_list" USING "gin" ("record_no" "public"."gin_trgm_ops");
 
 
@@ -1377,10 +1113,6 @@ CREATE INDEX "case_list_scsr_reviewed_idx" ON "public"."case_list" USING "btree"
 
 
 
-CREATE INDEX "case_list_status_trgm_idx" ON "public"."case_list" USING "gin" ("status" "public"."gin_trgm_ops");
-
-
-
 CREATE INDEX "case_list_typology_category_idx" ON "public"."case_list" USING "btree" ("typology_category");
 
 
@@ -1390,18 +1122,6 @@ CREATE INDEX "case_list_typology_name_idx" ON "public"."case_list" USING "btree"
 
 
 CREATE INDEX "case_list_typology_name_trgm_idx" ON "public"."case_list" USING "gin" ("typology_name" "public"."gin_trgm_ops");
-
-
-
-CREATE INDEX "coa_entry_date_idx" ON "public"."coa_entry" USING "btree" ("entry_date");
-
-
-
-CREATE INDEX "coa_entry_status_idx" ON "public"."coa_entry" USING "btree" ("approval_status");
-
-
-
-CREATE INDEX "coa_entry_user_date_idx" ON "public"."coa_entry" USING "btree" ("user_id", "entry_date");
 
 
 
@@ -1445,19 +1165,11 @@ CREATE INDEX "grantee_list_muni_status_idx" ON "public"."grantee_list" USING "bt
 
 
 
-CREATE INDEX "grantee_list_municipality_idx" ON "public"."grantee_list" USING "btree" ("municipality");
-
-
-
 CREATE INDEX "grantee_list_municipality_trgm_idx" ON "public"."grantee_list" USING "gin" ("municipality" "public"."gin_trgm_ops");
 
 
 
 CREATE INDEX "grantee_list_status_idx" ON "public"."grantee_list" USING "btree" ("status");
-
-
-
-CREATE INDEX "grantee_list_status_trgm_idx" ON "public"."grantee_list" USING "gin" ("status" "public"."gin_trgm_ops");
 
 
 
@@ -1541,19 +1253,7 @@ CREATE INDEX "transfer_ack_user_idx" ON "public"."transfer_ack" USING "btree" ("
 
 
 
-CREATE OR REPLACE TRIGGER "bdm_pcn_target_touch" BEFORE UPDATE ON "public"."bdm_pcn_target" FOR EACH ROW EXECUTE FUNCTION "public"."bdm_pcn_target_touch"();
-
-
-
 CREATE OR REPLACE TRIGGER "case_list_set_updated_at" BEFORE UPDATE ON "public"."case_list" FOR EACH ROW EXECUTE FUNCTION "public"."set_updated_at"();
-
-
-
-CREATE OR REPLACE TRIGGER "coa_entry_mark_change_request_unseen" BEFORE UPDATE ON "public"."coa_entry" FOR EACH ROW EXECUTE FUNCTION "public"."coa_mark_change_request_unseen"();
-
-
-
-CREATE OR REPLACE TRIGGER "coa_entry_set_updated_at" BEFORE UPDATE ON "public"."coa_entry" FOR EACH ROW EXECUTE FUNCTION "public"."coa_entry_touch_updated_at"();
 
 
 
@@ -1577,16 +1277,6 @@ CREATE OR REPLACE TRIGGER "staff_set_updated_at" BEFORE UPDATE ON "public"."staf
 
 
 
-ALTER TABLE ONLY "public"."bdm_pcn_target"
-    ADD CONSTRAINT "bdm_pcn_target_encoded_by_fkey" FOREIGN KEY ("encoded_by") REFERENCES "auth"."users"("id") ON DELETE SET NULL;
-
-
-
-ALTER TABLE ONLY "public"."bdm_pcn_target"
-    ADD CONSTRAINT "bdm_pcn_target_municipality_fkey" FOREIGN KEY ("municipality") REFERENCES "public"."municipality"("name") ON UPDATE CASCADE;
-
-
-
 ALTER TABLE ONLY "public"."case_list"
     ADD CONSTRAINT "case_list_approved_by_fkey" FOREIGN KEY ("approved_by") REFERENCES "public"."staff"("user_id") ON DELETE SET NULL;
 
@@ -1594,16 +1284,6 @@ ALTER TABLE ONLY "public"."case_list"
 
 ALTER TABLE ONLY "public"."case_list"
     ADD CONSTRAINT "case_list_hh_id_fkey" FOREIGN KEY ("hh_id") REFERENCES "public"."grantee_list"("hh_id") ON UPDATE CASCADE ON DELETE CASCADE;
-
-
-
-ALTER TABLE ONLY "public"."coa_entry"
-    ADD CONSTRAINT "coa_entry_approved_by_fkey" FOREIGN KEY ("approved_by") REFERENCES "auth"."users"("id") ON DELETE SET NULL;
-
-
-
-ALTER TABLE ONLY "public"."coa_entry"
-    ADD CONSTRAINT "coa_entry_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "auth"."users"("id") ON DELETE CASCADE;
 
 
 
@@ -1717,25 +1397,6 @@ ALTER TABLE ONLY "public"."transfer_ack"
 
 
 
-ALTER TABLE "public"."bdm_pcn_target" ENABLE ROW LEVEL SECURITY;
-
-
-CREATE POLICY "bdm_pcn_target_delete" ON "public"."bdm_pcn_target" FOR DELETE TO "authenticated" USING ("public"."bdm_pcn_caller_can_delete"());
-
-
-
-CREATE POLICY "bdm_pcn_target_insert" ON "public"."bdm_pcn_target" FOR INSERT TO "authenticated" WITH CHECK ("public"."bdm_pcn_caller_is_editor"());
-
-
-
-CREATE POLICY "bdm_pcn_target_select" ON "public"."bdm_pcn_target" FOR SELECT TO "authenticated" USING (true);
-
-
-
-CREATE POLICY "bdm_pcn_target_update" ON "public"."bdm_pcn_target" FOR UPDATE TO "authenticated" USING (("public"."bdm_pcn_caller_is_editor"() OR "public"."bdm_pcn_caller_can_edit_muni"("municipality")));
-
-
-
 ALTER TABLE "public"."case_list" ENABLE ROW LEVEL SECURITY;
 
 
@@ -1763,25 +1424,6 @@ ALTER TABLE "public"."cluster" ENABLE ROW LEVEL SECURITY;
 
 
 CREATE POLICY "cluster read" ON "public"."cluster" FOR SELECT TO "authenticated" USING (true);
-
-
-
-ALTER TABLE "public"."coa_entry" ENABLE ROW LEVEL SECURITY;
-
-
-CREATE POLICY "coa_entry_delete" ON "public"."coa_entry" FOR DELETE TO "authenticated" USING ((("user_id" = "auth"."uid"()) AND ("approval_status" = 'draft'::"text")));
-
-
-
-CREATE POLICY "coa_entry_insert" ON "public"."coa_entry" FOR INSERT TO "authenticated" WITH CHECK (("user_id" = "auth"."uid"()));
-
-
-
-CREATE POLICY "coa_entry_select" ON "public"."coa_entry" FOR SELECT TO "authenticated" USING ((("user_id" = "auth"."uid"()) OR "public"."coa_caller_supervises"("user_id") OR "public"."coa_caller_supervises_cluster"("user_id") OR "public"."coa_caller_is_elevated"()));
-
-
-
-CREATE POLICY "coa_entry_update" ON "public"."coa_entry" FOR UPDATE TO "authenticated" USING ((("user_id" = "auth"."uid"()) OR "public"."coa_caller_supervises"("user_id") OR "public"."coa_caller_approves_cluster"("user_id") OR "public"."coa_caller_is_elevated"())) WITH CHECK ((("user_id" = "auth"."uid"()) OR "public"."coa_caller_supervises"("user_id") OR "public"."coa_caller_approves_cluster"("user_id") OR "public"."coa_caller_is_elevated"()));
 
 
 
@@ -1995,10 +1637,6 @@ ALTER PUBLICATION "supabase_realtime" ADD TABLE ONLY "public"."case_list";
 
 
 
-ALTER PUBLICATION "supabase_realtime" ADD TABLE ONLY "public"."coa_entry";
-
-
-
 ALTER PUBLICATION "supabase_realtime" ADD TABLE ONLY "public"."grantee_transfer";
 
 
@@ -2179,30 +1817,6 @@ GRANT ALL ON FUNCTION "public"."gtrgm_out"("public"."gtrgm") TO "service_role";
 
 
 
-GRANT ALL ON FUNCTION "public"."bdm_pcn_caller_can_delete"() TO "anon";
-GRANT ALL ON FUNCTION "public"."bdm_pcn_caller_can_delete"() TO "authenticated";
-GRANT ALL ON FUNCTION "public"."bdm_pcn_caller_can_delete"() TO "service_role";
-
-
-
-GRANT ALL ON FUNCTION "public"."bdm_pcn_caller_can_edit_muni"("target_muni" "text") TO "anon";
-GRANT ALL ON FUNCTION "public"."bdm_pcn_caller_can_edit_muni"("target_muni" "text") TO "authenticated";
-GRANT ALL ON FUNCTION "public"."bdm_pcn_caller_can_edit_muni"("target_muni" "text") TO "service_role";
-
-
-
-GRANT ALL ON FUNCTION "public"."bdm_pcn_caller_is_editor"() TO "anon";
-GRANT ALL ON FUNCTION "public"."bdm_pcn_caller_is_editor"() TO "authenticated";
-GRANT ALL ON FUNCTION "public"."bdm_pcn_caller_is_editor"() TO "service_role";
-
-
-
-GRANT ALL ON FUNCTION "public"."bdm_pcn_target_touch"() TO "anon";
-GRANT ALL ON FUNCTION "public"."bdm_pcn_target_touch"() TO "authenticated";
-GRANT ALL ON FUNCTION "public"."bdm_pcn_target_touch"() TO "service_role";
-
-
-
 GRANT ALL ON FUNCTION "public"."case_list_municipality"("p_hh_id" "text", "p_muni" "text") TO "anon";
 GRANT ALL ON FUNCTION "public"."case_list_municipality"("p_hh_id" "text", "p_muni" "text") TO "authenticated";
 GRANT ALL ON FUNCTION "public"."case_list_municipality"("p_hh_id" "text", "p_muni" "text") TO "service_role";
@@ -2218,42 +1832,6 @@ GRANT ALL ON FUNCTION "public"."case_risk_counts"("p_cluster" integer) TO "servi
 GRANT ALL ON FUNCTION "public"."case_typology_counts"("p_cluster" integer) TO "anon";
 GRANT ALL ON FUNCTION "public"."case_typology_counts"("p_cluster" integer) TO "authenticated";
 GRANT ALL ON FUNCTION "public"."case_typology_counts"("p_cluster" integer) TO "service_role";
-
-
-
-GRANT ALL ON FUNCTION "public"."coa_caller_approves_cluster"("owner" "uuid") TO "anon";
-GRANT ALL ON FUNCTION "public"."coa_caller_approves_cluster"("owner" "uuid") TO "authenticated";
-GRANT ALL ON FUNCTION "public"."coa_caller_approves_cluster"("owner" "uuid") TO "service_role";
-
-
-
-GRANT ALL ON FUNCTION "public"."coa_caller_is_elevated"() TO "anon";
-GRANT ALL ON FUNCTION "public"."coa_caller_is_elevated"() TO "authenticated";
-GRANT ALL ON FUNCTION "public"."coa_caller_is_elevated"() TO "service_role";
-
-
-
-GRANT ALL ON FUNCTION "public"."coa_caller_supervises"("owner" "uuid") TO "anon";
-GRANT ALL ON FUNCTION "public"."coa_caller_supervises"("owner" "uuid") TO "authenticated";
-GRANT ALL ON FUNCTION "public"."coa_caller_supervises"("owner" "uuid") TO "service_role";
-
-
-
-GRANT ALL ON FUNCTION "public"."coa_caller_supervises_cluster"("owner" "uuid") TO "anon";
-GRANT ALL ON FUNCTION "public"."coa_caller_supervises_cluster"("owner" "uuid") TO "authenticated";
-GRANT ALL ON FUNCTION "public"."coa_caller_supervises_cluster"("owner" "uuid") TO "service_role";
-
-
-
-GRANT ALL ON FUNCTION "public"."coa_entry_touch_updated_at"() TO "anon";
-GRANT ALL ON FUNCTION "public"."coa_entry_touch_updated_at"() TO "authenticated";
-GRANT ALL ON FUNCTION "public"."coa_entry_touch_updated_at"() TO "service_role";
-
-
-
-GRANT ALL ON FUNCTION "public"."coa_mark_change_request_unseen"() TO "anon";
-GRANT ALL ON FUNCTION "public"."coa_mark_change_request_unseen"() TO "authenticated";
-GRANT ALL ON FUNCTION "public"."coa_mark_change_request_unseen"() TO "service_role";
 
 
 
@@ -2559,12 +2137,6 @@ GRANT ALL ON TABLE "public"."barangay_options" TO "service_role";
 
 
 
-GRANT ALL ON TABLE "public"."bdm_pcn_target" TO "anon";
-GRANT ALL ON TABLE "public"."bdm_pcn_target" TO "authenticated";
-GRANT ALL ON TABLE "public"."bdm_pcn_target" TO "service_role";
-
-
-
 GRANT ALL ON TABLE "public"."case_list" TO "anon";
 GRANT ALL ON TABLE "public"."case_list" TO "authenticated";
 GRANT ALL ON TABLE "public"."case_list" TO "service_role";
@@ -2604,12 +2176,6 @@ GRANT ALL ON TABLE "public"."case_typology_options" TO "service_role";
 GRANT ALL ON TABLE "public"."cluster" TO "anon";
 GRANT ALL ON TABLE "public"."cluster" TO "authenticated";
 GRANT ALL ON TABLE "public"."cluster" TO "service_role";
-
-
-
-GRANT ALL ON TABLE "public"."coa_entry" TO "anon";
-GRANT ALL ON TABLE "public"."coa_entry" TO "authenticated";
-GRANT ALL ON TABLE "public"."coa_entry" TO "service_role";
 
 
 
