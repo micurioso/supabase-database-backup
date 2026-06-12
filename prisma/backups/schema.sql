@@ -624,6 +624,7 @@ CREATE TABLE IF NOT EXISTS "public"."monitor" (
     "gsheet_id" "text",
     "gsheet_tab" "text",
     "status" "text" DEFAULT 'open'::"text" NOT NULL,
+    "allow_manual_add" boolean DEFAULT false NOT NULL,
     CONSTRAINT "monitor_status_check" CHECK (("status" = ANY (ARRAY['open'::"text", 'sealed'::"text", 'hidden'::"text"])))
 );
 
@@ -1493,7 +1494,7 @@ CREATE POLICY "monitor_row_delete" ON "public"."monitor_row" FOR DELETE TO "auth
 
 
 
-CREATE POLICY "monitor_row_insert" ON "public"."monitor_row" FOR INSERT TO "authenticated" WITH CHECK (("public"."monitor_caller_is_editor"() OR "public"."monitor_caller_can_edit_muni"("municipality")));
+CREATE POLICY "monitor_row_insert" ON "public"."monitor_row" FOR INSERT TO "authenticated" WITH CHECK ("public"."monitor_caller_is_editor"());
 
 
 
