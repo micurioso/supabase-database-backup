@@ -625,6 +625,8 @@ CREATE TABLE IF NOT EXISTS "public"."monitor" (
     "gsheet_tab" "text",
     "status" "text" DEFAULT 'open'::"text" NOT NULL,
     "allow_manual_add" boolean DEFAULT false NOT NULL,
+    "sort_order" integer,
+    "column_labels" "jsonb" DEFAULT '{}'::"jsonb" NOT NULL,
     CONSTRAINT "monitor_status_check" CHECK (("status" = ANY (ARRAY['open'::"text", 'sealed'::"text", 'hidden'::"text"])))
 );
 
