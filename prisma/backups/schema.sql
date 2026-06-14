@@ -403,6 +403,29 @@ SET default_tablespace = '';
 SET default_table_access_method = "heap";
 
 
+CREATE TABLE IF NOT EXISTS "public"."auth_throttle" (
+    "id" bigint NOT NULL,
+    "ip" "text" NOT NULL,
+    "kind" "text" NOT NULL,
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "auth_throttle_kind_check" CHECK (("kind" = ANY (ARRAY['login'::"text", 'register'::"text"])))
+);
+
+
+ALTER TABLE "public"."auth_throttle" OWNER TO "postgres";
+
+
+ALTER TABLE "public"."auth_throttle" ALTER COLUMN "id" ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME "public"."auth_throttle_id_seq"
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+
 CREATE TABLE IF NOT EXISTS "public"."grantee_list" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "hh_id" "text" NOT NULL,
@@ -954,6 +977,11 @@ CREATE OR REPLACE VIEW "public"."v_grantee_list" WITH ("security_invoker"='on') 
 ALTER VIEW "public"."v_grantee_list" OWNER TO "postgres";
 
 
+ALTER TABLE ONLY "public"."auth_throttle"
+    ADD CONSTRAINT "auth_throttle_pkey" PRIMARY KEY ("id");
+
+
+
 ALTER TABLE ONLY "public"."case_list"
     ADD CONSTRAINT "case_list_pkey" PRIMARY KEY ("id");
 
@@ -1061,6 +1089,10 @@ ALTER TABLE ONLY "public"."swdi_score"
 
 ALTER TABLE ONLY "public"."transfer_ack"
     ADD CONSTRAINT "transfer_ack_pkey" PRIMARY KEY ("user_id", "transfer_id");
+
+
+
+CREATE INDEX "auth_throttle_lookup_idx" ON "public"."auth_throttle" USING "btree" ("ip", "kind", "created_at" DESC);
 
 
 
@@ -1398,6 +1430,9 @@ ALTER TABLE ONLY "public"."transfer_ack"
 ALTER TABLE ONLY "public"."transfer_ack"
     ADD CONSTRAINT "transfer_ack_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "auth"."users"("id") ON DELETE CASCADE;
 
+
+
+ALTER TABLE "public"."auth_throttle" ENABLE ROW LEVEL SECURITY;
 
 
 ALTER TABLE "public"."case_list" ENABLE ROW LEVEL SECURITY;
@@ -2125,6 +2160,18 @@ GRANT ALL ON FUNCTION "public"."word_similarity_op"("text", "text") TO "service_
 
 
 
+
+
+
+GRANT ALL ON TABLE "public"."auth_throttle" TO "anon";
+GRANT ALL ON TABLE "public"."auth_throttle" TO "authenticated";
+GRANT ALL ON TABLE "public"."auth_throttle" TO "service_role";
+
+
+
+GRANT ALL ON SEQUENCE "public"."auth_throttle_id_seq" TO "anon";
+GRANT ALL ON SEQUENCE "public"."auth_throttle_id_seq" TO "authenticated";
+GRANT ALL ON SEQUENCE "public"."auth_throttle_id_seq" TO "service_role";
 
 
 
