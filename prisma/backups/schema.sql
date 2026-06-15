@@ -723,6 +723,7 @@ CREATE TABLE IF NOT EXISTS "public"."staff" (
     "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "supervisor_user_id" "uuid",
     "employee_no" "text",
+    "last_seen_at" timestamp with time zone,
     CONSTRAINT "staff_role_check" CHECK (("role" = ANY (ARRAY['admin'::"text", 'provincial'::"text", 'swoIII'::"text", 'swoII'::"text", 'case_manager'::"text", 'social_welfare_assistant'::"text", 'poo_staff'::"text"])))
 );
 
