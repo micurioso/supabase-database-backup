@@ -283,6 +283,16 @@ $$;
 ALTER FUNCTION "public"."monitor_caller_is_editor"() OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."next_transfer_referral_id"() RETURNS "text"
+    LANGUAGE "sql"
+    AS $$
+  select 'CAV-TOR-' || lpad(nextval('public.transfer_referral_seq')::text, 5, '0');
+$$;
+
+
+ALTER FUNCTION "public"."next_transfer_referral_id"() OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."refresh_grantee_lhf"() RETURNS "void"
     LANGUAGE "sql"
     AS $$
@@ -570,6 +580,17 @@ CREATE TABLE IF NOT EXISTS "public"."cluster" (
 ALTER TABLE "public"."cluster" OWNER TO "postgres";
 
 
+CREATE TABLE IF NOT EXISTS "public"."email_directory" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "label" "text",
+    "email" "text" NOT NULL,
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL
+);
+
+
+ALTER TABLE "public"."email_directory" OWNER TO "postgres";
+
+
 CREATE TABLE IF NOT EXISTS "public"."grantee_import_batch" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "imported_at" timestamp with time zone DEFAULT "now"() NOT NULL,
@@ -712,6 +733,23 @@ CREATE TABLE IF NOT EXISTS "public"."registration_request" (
 
 
 ALTER TABLE "public"."registration_request" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "public"."smtp_config" (
+    "id" integer DEFAULT 1 NOT NULL,
+    "host" "text",
+    "port" integer,
+    "username" "text",
+    "password" "text",
+    "from_addr" "text",
+    "enabled" boolean DEFAULT false NOT NULL,
+    "updated_at" timestamp with time zone,
+    "updated_by" "uuid",
+    CONSTRAINT "smtp_config_id_check" CHECK (("id" = 1))
+);
+
+
+ALTER TABLE "public"."smtp_config" OWNER TO "postgres";
 
 
 CREATE TABLE IF NOT EXISTS "public"."staff" (
@@ -943,6 +981,54 @@ CREATE TABLE IF NOT EXISTS "public"."transfer_ack" (
 ALTER TABLE "public"."transfer_ack" OWNER TO "postgres";
 
 
+CREATE SEQUENCE IF NOT EXISTS "public"."transfer_referral_seq"
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER SEQUENCE "public"."transfer_referral_seq" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "public"."transfer_request" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "hh_id" "text" NOT NULL,
+    "grantee_name" "text",
+    "old_municipality" "text",
+    "old_barangay" "text",
+    "old_address" "text",
+    "dest_region" "text",
+    "dest_province" "text",
+    "dest_municipality" "text",
+    "dest_barangay" "text",
+    "mobile" "text",
+    "request_type" "text" DEFAULT 'TOR'::"text" NOT NULL,
+    "remarks" "text",
+    "referral_id" "text",
+    "status" "text" DEFAULT 'pending'::"text" NOT NULL,
+    "recipient_email" "text",
+    "requested_by" "uuid",
+    "requested_by_name" "text",
+    "requested_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "reviewed_by" "uuid",
+    "reviewed_by_name" "text",
+    "reviewed_at" timestamp with time zone,
+    "sent_at" timestamp with time zone,
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "attachment_urls" "text"[],
+    "dest_street" "text",
+    "client_status" "text",
+    "cc_emails" "text",
+    "bcc_emails" "text",
+    CONSTRAINT "transfer_request_status_check" CHECK (("status" = ANY (ARRAY['pending'::"text", 'approved'::"text", 'rejected'::"text", 'sent'::"text"])))
+);
+
+
+ALTER TABLE "public"."transfer_request" OWNER TO "postgres";
+
+
 CREATE OR REPLACE VIEW "public"."v_grantee_list" WITH ("security_invoker"='on') AS
  SELECT "id",
     "hh_id",
@@ -1000,6 +1086,11 @@ ALTER TABLE ONLY "public"."cluster"
 
 ALTER TABLE ONLY "public"."cluster"
     ADD CONSTRAINT "cluster_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."email_directory"
+    ADD CONSTRAINT "email_directory_pkey" PRIMARY KEY ("id");
 
 
 
@@ -1063,6 +1154,11 @@ ALTER TABLE ONLY "public"."registration_request"
 
 
 
+ALTER TABLE ONLY "public"."smtp_config"
+    ADD CONSTRAINT "smtp_config_pkey" PRIMARY KEY ("id");
+
+
+
 ALTER TABLE ONLY "public"."staff_directory"
     ADD CONSTRAINT "staff_directory_pkey" PRIMARY KEY ("id");
 
@@ -1090,6 +1186,11 @@ ALTER TABLE ONLY "public"."swdi_score"
 
 ALTER TABLE ONLY "public"."transfer_ack"
     ADD CONSTRAINT "transfer_ack_pkey" PRIMARY KEY ("user_id", "transfer_id");
+
+
+
+ALTER TABLE ONLY "public"."transfer_request"
+    ADD CONSTRAINT "transfer_request_pkey" PRIMARY KEY ("id");
 
 
 
@@ -1158,6 +1259,10 @@ CREATE INDEX "case_list_typology_name_idx" ON "public"."case_list" USING "btree"
 
 
 CREATE INDEX "case_list_typology_name_trgm_idx" ON "public"."case_list" USING "gin" ("typology_name" "public"."gin_trgm_ops");
+
+
+
+CREATE INDEX "email_directory_label_idx" ON "public"."email_directory" USING "btree" ("label");
 
 
 
@@ -1289,6 +1394,18 @@ CREATE INDEX "transfer_ack_user_idx" ON "public"."transfer_ack" USING "btree" ("
 
 
 
+CREATE INDEX "transfer_request_hh_idx" ON "public"."transfer_request" USING "btree" ("hh_id");
+
+
+
+CREATE INDEX "transfer_request_old_muni_idx" ON "public"."transfer_request" USING "btree" ("old_municipality");
+
+
+
+CREATE INDEX "transfer_request_status_idx" ON "public"."transfer_request" USING "btree" ("status", "requested_at" DESC);
+
+
+
 CREATE OR REPLACE TRIGGER "case_list_set_updated_at" BEFORE UPDATE ON "public"."case_list" FOR EACH ROW EXECUTE FUNCTION "public"."set_updated_at"();
 
 
@@ -1383,6 +1500,11 @@ ALTER TABLE ONLY "public"."registration_request"
 
 
 
+ALTER TABLE ONLY "public"."smtp_config"
+    ADD CONSTRAINT "smtp_config_updated_by_fkey" FOREIGN KEY ("updated_by") REFERENCES "auth"."users"("id") ON DELETE SET NULL;
+
+
+
 ALTER TABLE ONLY "public"."staff"
     ADD CONSTRAINT "staff_cluster_id_fkey" FOREIGN KEY ("cluster_id") REFERENCES "public"."cluster"("id") ON UPDATE CASCADE;
 
@@ -1433,6 +1555,16 @@ ALTER TABLE ONLY "public"."transfer_ack"
 
 
 
+ALTER TABLE ONLY "public"."transfer_request"
+    ADD CONSTRAINT "transfer_request_requested_by_fkey" FOREIGN KEY ("requested_by") REFERENCES "auth"."users"("id") ON DELETE SET NULL;
+
+
+
+ALTER TABLE ONLY "public"."transfer_request"
+    ADD CONSTRAINT "transfer_request_reviewed_by_fkey" FOREIGN KEY ("reviewed_by") REFERENCES "auth"."users"("id") ON DELETE SET NULL;
+
+
+
 ALTER TABLE "public"."auth_throttle" ENABLE ROW LEVEL SECURITY;
 
 
@@ -1463,6 +1595,13 @@ ALTER TABLE "public"."cluster" ENABLE ROW LEVEL SECURITY;
 
 
 CREATE POLICY "cluster read" ON "public"."cluster" FOR SELECT TO "authenticated" USING (true);
+
+
+
+ALTER TABLE "public"."email_directory" ENABLE ROW LEVEL SECURITY;
+
+
+CREATE POLICY "email_directory authenticated read" ON "public"."email_directory" FOR SELECT TO "authenticated" USING (true);
 
 
 
@@ -1573,6 +1712,9 @@ CREATE POLICY "notification_clear self write" ON "public"."notification_clear" T
 ALTER TABLE "public"."registration_request" ENABLE ROW LEVEL SECURITY;
 
 
+ALTER TABLE "public"."smtp_config" ENABLE ROW LEVEL SECURITY;
+
+
 ALTER TABLE "public"."staff" ENABLE ROW LEVEL SECURITY;
 
 
@@ -1660,6 +1802,17 @@ CREATE POLICY "transfer_ack self read" ON "public"."transfer_ack" FOR SELECT TO 
 
 
 CREATE POLICY "transfer_ack self write" ON "public"."transfer_ack" TO "authenticated" USING (("user_id" = "auth"."uid"())) WITH CHECK (("user_id" = "auth"."uid"()));
+
+
+
+ALTER TABLE "public"."transfer_request" ENABLE ROW LEVEL SECURITY;
+
+
+CREATE POLICY "transfer_request authenticated insert" ON "public"."transfer_request" FOR INSERT TO "authenticated" WITH CHECK (true);
+
+
+
+CREATE POLICY "transfer_request authenticated read" ON "public"."transfer_request" FOR SELECT TO "authenticated" USING (true);
 
 
 
@@ -2007,6 +2160,12 @@ GRANT ALL ON FUNCTION "public"."monitor_caller_is_editor"() TO "service_role";
 
 
 
+GRANT ALL ON FUNCTION "public"."next_transfer_referral_id"() TO "anon";
+GRANT ALL ON FUNCTION "public"."next_transfer_referral_id"() TO "authenticated";
+GRANT ALL ON FUNCTION "public"."next_transfer_referral_id"() TO "service_role";
+
+
+
 GRANT ALL ON FUNCTION "public"."refresh_grantee_lhf"() TO "anon";
 GRANT ALL ON FUNCTION "public"."refresh_grantee_lhf"() TO "authenticated";
 GRANT ALL ON FUNCTION "public"."refresh_grantee_lhf"() TO "service_role";
@@ -2230,6 +2389,12 @@ GRANT ALL ON TABLE "public"."cluster" TO "service_role";
 
 
 
+GRANT ALL ON TABLE "public"."email_directory" TO "anon";
+GRANT ALL ON TABLE "public"."email_directory" TO "authenticated";
+GRANT ALL ON TABLE "public"."email_directory" TO "service_role";
+
+
+
 GRANT ALL ON TABLE "public"."grantee_import_batch" TO "anon";
 GRANT ALL ON TABLE "public"."grantee_import_batch" TO "authenticated";
 GRANT ALL ON TABLE "public"."grantee_import_batch" TO "service_role";
@@ -2284,6 +2449,12 @@ GRANT ALL ON TABLE "public"."registration_request" TO "service_role";
 
 
 
+GRANT ALL ON TABLE "public"."smtp_config" TO "anon";
+GRANT ALL ON TABLE "public"."smtp_config" TO "authenticated";
+GRANT ALL ON TABLE "public"."smtp_config" TO "service_role";
+
+
+
 GRANT ALL ON TABLE "public"."staff" TO "anon";
 GRANT ALL ON TABLE "public"."staff" TO "authenticated";
 GRANT ALL ON TABLE "public"."staff" TO "service_role";
@@ -2317,6 +2488,18 @@ GRANT ALL ON TABLE "public"."swdi_score" TO "service_role";
 GRANT ALL ON TABLE "public"."transfer_ack" TO "anon";
 GRANT ALL ON TABLE "public"."transfer_ack" TO "authenticated";
 GRANT ALL ON TABLE "public"."transfer_ack" TO "service_role";
+
+
+
+GRANT ALL ON SEQUENCE "public"."transfer_referral_seq" TO "anon";
+GRANT ALL ON SEQUENCE "public"."transfer_referral_seq" TO "authenticated";
+GRANT ALL ON SEQUENCE "public"."transfer_referral_seq" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."transfer_request" TO "anon";
+GRANT ALL ON TABLE "public"."transfer_request" TO "authenticated";
+GRANT ALL ON TABLE "public"."transfer_request" TO "service_role";
 
 
 
