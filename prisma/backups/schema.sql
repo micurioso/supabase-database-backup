@@ -408,6 +408,80 @@ $$;
 
 ALTER FUNCTION "public"."swdi_gap_counts"("p_munis" "text"[]) OWNER TO "postgres";
 
+
+CREATE OR REPLACE FUNCTION "public"."sync_changed_grantees_to_monitors"() RETURNS "trigger"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'public'
+    AS $$
+begin
+  update public.monitor_row mr
+     set municipality = g.municipality,
+         data = mr.data
+           || case when m.municipality_key is not null
+                   then jsonb_build_object(m.municipality_key, coalesce(g.municipality, ''))
+                   else '{}'::jsonb end
+           || case when m.barangay_key is not null
+                   then jsonb_build_object(m.barangay_key, coalesce(g.barangay, ''))
+                   else '{}'::jsonb end
+           || case when m.client_status_key is not null
+                   then jsonb_build_object(m.client_status_key, coalesce(g.status, ''))
+                   else '{}'::jsonb end
+    from public.monitor m, changed_grantees g
+   where mr.monitor_id = m.id
+     and g.hh_id = mr.beneficiary_hh_id
+     and m.beneficiary_key is not null;
+
+  return null;
+end;
+$$;
+
+
+ALTER FUNCTION "public"."sync_changed_grantees_to_monitors"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."sync_monitor_grantee_profiles"("p_monitor_id" "uuid" DEFAULT NULL::"uuid") RETURNS bigint
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'public'
+    AS $$
+declare
+  affected bigint := 0;
+begin
+  if auth.uid() is not null and not public.monitor_caller_is_editor() then
+    raise exception 'Editor access required';
+  end if;
+
+  update public.monitor_row mr
+     set beneficiary_hh_id = g.hh_id,
+         municipality = g.municipality,
+         data = mr.data
+           || case when m.municipality_key is not null
+                   then jsonb_build_object(m.municipality_key, coalesce(g.municipality, ''))
+                   else '{}'::jsonb end
+           || case when m.barangay_key is not null
+                   then jsonb_build_object(m.barangay_key, coalesce(g.barangay, ''))
+                   else '{}'::jsonb end
+           || case when m.client_status_key is not null
+                   then jsonb_build_object(m.client_status_key, coalesce(g.status, ''))
+                   else '{}'::jsonb end
+    from public.monitor m
+    join public.grantee_list g
+      on true
+   where mr.monitor_id = m.id
+     and m.beneficiary_key is not null
+     and (p_monitor_id is null or m.id = p_monitor_id)
+     and g.hh_id = coalesce(
+       nullif(btrim(mr.beneficiary_hh_id), ''),
+       nullif(btrim(mr.data ->> m.beneficiary_key), '')
+     );
+
+  get diagnostics affected = row_count;
+  return affected;
+end;
+$$;
+
+
+ALTER FUNCTION "public"."sync_monitor_grantee_profiles"("p_monitor_id" "uuid") OWNER TO "postgres";
+
 SET default_tablespace = '';
 
 SET default_table_access_method = "heap";
@@ -671,11 +745,19 @@ CREATE TABLE IF NOT EXISTS "public"."monitor" (
     "allow_manual_add" boolean DEFAULT false NOT NULL,
     "sort_order" integer,
     "column_labels" "jsonb" DEFAULT '{}'::"jsonb" NOT NULL,
+    "beneficiary_key" "text",
+    "barangay_key" "text",
+    "client_status_key" "text",
+    "filter_columns" "jsonb" DEFAULT '[]'::"jsonb" NOT NULL,
     CONSTRAINT "monitor_status_check" CHECK (("status" = ANY (ARRAY['open'::"text", 'sealed'::"text", 'hidden'::"text"])))
 );
 
 
 ALTER TABLE "public"."monitor" OWNER TO "postgres";
+
+
+COMMENT ON COLUMN "public"."monitor"."filter_columns" IS 'Roster column names exposed as dropdown filters on the monitor table.';
+
 
 
 CREATE TABLE IF NOT EXISTS "public"."monitor_row" (
@@ -688,7 +770,8 @@ CREATE TABLE IF NOT EXISTS "public"."monitor_row" (
     "encoded_by" "uuid",
     "encoded_at" timestamp with time zone,
     "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
-    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "beneficiary_hh_id" "text"
 );
 
 
@@ -728,6 +811,7 @@ CREATE TABLE IF NOT EXISTS "public"."registration_request" (
     "designation" "text",
     "employee_no" "text",
     "cluster_id" integer,
+    "email" "text",
     CONSTRAINT "registration_request_status_check" CHECK (("status" = ANY (ARRAY['pending'::"text", 'approved'::"text", 'rejected'::"text"])))
 );
 
@@ -780,7 +864,8 @@ CREATE TABLE IF NOT EXISTS "public"."staff_directory" (
     "first_name" "text" NOT NULL,
     "middle_name" "text",
     "last_name" "text" NOT NULL,
-    "employee_no" "text"
+    "employee_no" "text",
+    "email" "text"
 );
 
 
@@ -1334,6 +1419,10 @@ CREATE INDEX "import_log_imported_at_idx" ON "public"."import_log" USING "btree"
 
 
 
+CREATE INDEX "monitor_row_beneficiary_hh_idx" ON "public"."monitor_row" USING "btree" ("beneficiary_hh_id") WHERE ("beneficiary_hh_id" IS NOT NULL);
+
+
+
 CREATE INDEX "monitor_row_monitor_idx" ON "public"."monitor_row" USING "btree" ("monitor_id");
 
 
@@ -1347,6 +1436,10 @@ CREATE INDEX "municipality_cluster_id_idx" ON "public"."municipality" USING "btr
 
 
 CREATE INDEX "registration_request_status_idx" ON "public"."registration_request" USING "btree" ("status");
+
+
+
+CREATE UNIQUE INDEX "staff_directory_email_key" ON "public"."staff_directory" USING "btree" ("lower"("email")) WHERE ("email" IS NOT NULL);
 
 
 
@@ -1407,6 +1500,14 @@ CREATE INDEX "transfer_request_status_idx" ON "public"."transfer_request" USING 
 
 
 CREATE OR REPLACE TRIGGER "case_list_set_updated_at" BEFORE UPDATE ON "public"."case_list" FOR EACH ROW EXECUTE FUNCTION "public"."set_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "grantee_monitor_sync_insert" AFTER INSERT ON "public"."grantee_list" REFERENCING NEW TABLE AS "changed_grantees" FOR EACH STATEMENT EXECUTE FUNCTION "public"."sync_changed_grantees_to_monitors"();
+
+
+
+CREATE OR REPLACE TRIGGER "grantee_monitor_sync_update" AFTER UPDATE ON "public"."grantee_list" REFERENCING NEW TABLE AS "changed_grantees" FOR EACH STATEMENT EXECUTE FUNCTION "public"."sync_changed_grantees_to_monitors"();
 
 
 
@@ -2270,6 +2371,19 @@ GRANT ALL ON FUNCTION "public"."strict_word_similarity_op"("text", "text") TO "s
 GRANT ALL ON FUNCTION "public"."swdi_gap_counts"("p_munis" "text"[]) TO "anon";
 GRANT ALL ON FUNCTION "public"."swdi_gap_counts"("p_munis" "text"[]) TO "authenticated";
 GRANT ALL ON FUNCTION "public"."swdi_gap_counts"("p_munis" "text"[]) TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."sync_changed_grantees_to_monitors"() TO "anon";
+GRANT ALL ON FUNCTION "public"."sync_changed_grantees_to_monitors"() TO "authenticated";
+GRANT ALL ON FUNCTION "public"."sync_changed_grantees_to_monitors"() TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."sync_monitor_grantee_profiles"("p_monitor_id" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."sync_monitor_grantee_profiles"("p_monitor_id" "uuid") TO "anon";
+GRANT ALL ON FUNCTION "public"."sync_monitor_grantee_profiles"("p_monitor_id" "uuid") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."sync_monitor_grantee_profiles"("p_monitor_id" "uuid") TO "service_role";
 
 
 
