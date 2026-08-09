@@ -173,6 +173,44 @@ $$;
 ALTER FUNCTION "public"."dashboard_municipality_metrics"("p_cluster" integer) OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."delete_user_smtp_secret"() RETURNS "trigger"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+begin
+  if old.password_secret_id is not null then
+    delete from vault.secrets where id = old.password_secret_id;
+  end if;
+  return old;
+end;
+$$;
+
+
+ALTER FUNCTION "public"."delete_user_smtp_secret"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."get_user_smtp_config"("p_user_id" "uuid") RETURNS TABLE("host" "text", "port" integer, "username" "text", "from_addr" "text", "enabled" boolean, "has_password" boolean, "smtp_password" "text", "updated_at" timestamp with time zone)
+    LANGUAGE "sql" STABLE SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+  select
+    c.host,
+    c.port,
+    c.username,
+    c.from_addr,
+    c.enabled,
+    c.password_secret_id is not null,
+    s.decrypted_secret,
+    c.updated_at
+  from public.user_smtp_config c
+  left join vault.decrypted_secrets s on s.id = c.password_secret_id
+  where c.user_id = p_user_id;
+$$;
+
+
+ALTER FUNCTION "public"."get_user_smtp_config"("p_user_id" "uuid") OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."grantee_active_demographics"("p_cluster" integer DEFAULT NULL::integer) RETURNS TABLE("dim" "text", "label" "text", "cnt" bigint)
     LANGUAGE "sql" STABLE SECURITY DEFINER
     SET "search_path" TO 'public'
@@ -329,6 +367,64 @@ $$;
 ALTER FUNCTION "public"."set_updated_at"() OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."set_user_smtp_config"("p_user_id" "uuid", "p_host" "text", "p_port" integer, "p_username" "text", "p_password" "text", "p_from_addr" "text", "p_enabled" boolean) RETURNS "void"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+declare
+  v_secret_id uuid;
+begin
+  if p_user_id is null then
+    raise exception 'A user ID is required';
+  end if;
+
+  select c.password_secret_id
+    into v_secret_id
+  from public.user_smtp_config c
+  where c.user_id = p_user_id;
+
+  if nullif(p_password, '') is not null then
+    if v_secret_id is null then
+      select vault.create_secret(p_password) into v_secret_id;
+    else
+      perform vault.update_secret(v_secret_id, p_password);
+    end if;
+  end if;
+
+  insert into public.user_smtp_config (
+    user_id,
+    host,
+    port,
+    username,
+    password_secret_id,
+    from_addr,
+    enabled,
+    updated_at
+  ) values (
+    p_user_id,
+    nullif(btrim(p_host), ''),
+    p_port,
+    nullif(btrim(p_username), ''),
+    v_secret_id,
+    nullif(btrim(p_from_addr), ''),
+    coalesce(p_enabled, false),
+    now()
+  )
+  on conflict (user_id) do update set
+    host = excluded.host,
+    port = excluded.port,
+    username = excluded.username,
+    password_secret_id = excluded.password_secret_id,
+    from_addr = excluded.from_addr,
+    enabled = excluded.enabled,
+    updated_at = excluded.updated_at;
+end;
+$$;
+
+
+ALTER FUNCTION "public"."set_user_smtp_config"("p_user_id" "uuid", "p_host" "text", "p_port" integer, "p_username" "text", "p_password" "text", "p_from_addr" "text", "p_enabled" boolean) OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."staff_directory_compose_name"() RETURNS "trigger"
     LANGUAGE "plpgsql"
     AS $$
@@ -412,6 +508,7 @@ ALTER FUNCTION "public"."swdi_gap_counts"("p_munis" "text"[]) OWNER TO "postgres
 CREATE OR REPLACE FUNCTION "public"."sync_changed_grantees_to_monitors"() RETURNS "trigger"
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO 'public'
+    SET "statement_timeout" TO '30s'
     AS $$
 begin
   update public.monitor_row mr
@@ -429,7 +526,25 @@ begin
     from public.monitor m, changed_grantees g
    where mr.monitor_id = m.id
      and g.hh_id = mr.beneficiary_hh_id
-     and m.beneficiary_key is not null;
+     and m.beneficiary_key is not null
+     and (
+       mr.municipality is distinct from g.municipality
+       or (
+         m.municipality_key is not null
+         and (mr.data ->> m.municipality_key)
+           is distinct from coalesce(g.municipality, '')
+       )
+       or (
+         m.barangay_key is not null
+         and (mr.data ->> m.barangay_key)
+           is distinct from coalesce(g.barangay, '')
+       )
+       or (
+         m.client_status_key is not null
+         and (mr.data ->> m.client_status_key)
+           is distinct from coalesce(g.status, '')
+       )
+     );
 
   return null;
 end;
@@ -442,6 +557,7 @@ ALTER FUNCTION "public"."sync_changed_grantees_to_monitors"() OWNER TO "postgres
 CREATE OR REPLACE FUNCTION "public"."sync_monitor_grantee_profiles"("p_monitor_id" "uuid" DEFAULT NULL::"uuid") RETURNS bigint
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO 'public'
+    SET "statement_timeout" TO '30s'
     AS $$
 declare
   affected bigint := 0;
@@ -472,6 +588,25 @@ begin
      and g.hh_id = coalesce(
        nullif(btrim(mr.beneficiary_hh_id), ''),
        nullif(btrim(mr.data ->> m.beneficiary_key), '')
+     )
+     and (
+       mr.beneficiary_hh_id is distinct from g.hh_id
+       or mr.municipality is distinct from g.municipality
+       or (
+         m.municipality_key is not null
+         and (mr.data ->> m.municipality_key)
+           is distinct from coalesce(g.municipality, '')
+       )
+       or (
+         m.barangay_key is not null
+         and (mr.data ->> m.barangay_key)
+           is distinct from coalesce(g.barangay, '')
+       )
+       or (
+         m.client_status_key is not null
+         and (mr.data ->> m.client_status_key)
+           is distinct from coalesce(g.status, '')
+       )
      );
 
   get diagnostics affected = row_count;
@@ -1114,6 +1249,22 @@ CREATE TABLE IF NOT EXISTS "public"."transfer_request" (
 ALTER TABLE "public"."transfer_request" OWNER TO "postgres";
 
 
+CREATE TABLE IF NOT EXISTS "public"."user_smtp_config" (
+    "user_id" "uuid" NOT NULL,
+    "host" "text",
+    "port" integer,
+    "username" "text",
+    "password_secret_id" "uuid",
+    "from_addr" "text",
+    "enabled" boolean DEFAULT false NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "user_smtp_config_port_check" CHECK ((("port" IS NULL) OR (("port" >= 1) AND ("port" <= 65535))))
+);
+
+
+ALTER TABLE "public"."user_smtp_config" OWNER TO "postgres";
+
+
 CREATE OR REPLACE VIEW "public"."v_grantee_list" WITH ("security_invoker"='on') AS
  SELECT "id",
     "hh_id",
@@ -1279,6 +1430,11 @@ ALTER TABLE ONLY "public"."transfer_request"
 
 
 
+ALTER TABLE ONLY "public"."user_smtp_config"
+    ADD CONSTRAINT "user_smtp_config_pkey" PRIMARY KEY ("user_id");
+
+
+
 CREATE INDEX "auth_throttle_lookup_idx" ON "public"."auth_throttle" USING "btree" ("ip", "kind", "created_at" DESC);
 
 
@@ -1335,6 +1491,10 @@ CREATE INDEX "case_list_scsr_reviewed_idx" ON "public"."case_list" USING "btree"
 
 
 
+CREATE INDEX "case_list_status_idx" ON "public"."case_list" USING "btree" ("status");
+
+
+
 CREATE INDEX "case_list_typology_category_idx" ON "public"."case_list" USING "btree" ("typology_category");
 
 
@@ -1367,6 +1527,10 @@ CREATE INDEX "grantee_list_barangay_trgm_idx" ON "public"."grantee_list" USING "
 
 
 
+CREATE INDEX "grantee_list_birthday_idx" ON "public"."grantee_list" USING "btree" ("birthday");
+
+
+
 CREATE INDEX "grantee_list_entry_id_idx" ON "public"."grantee_list" USING "btree" ("entry_id");
 
 
@@ -1376,6 +1540,10 @@ CREATE INDEX "grantee_list_grantee_name_trgm_idx" ON "public"."grantee_list" USI
 
 
 CREATE INDEX "grantee_list_hh_id_trgm_idx" ON "public"."grantee_list" USING "gin" ("hh_id" "public"."gin_trgm_ops");
+
+
+
+CREATE INDEX "grantee_list_ip_affiliation_present_idx" ON "public"."grantee_list" USING "btree" ("municipality", "ip_affiliation") INCLUDE ("status") WHERE (("ip_affiliation" IS NOT NULL) AND ("ip_affiliation" <> ''::"text"));
 
 
 
@@ -1420,6 +1588,10 @@ CREATE INDEX "import_log_imported_at_idx" ON "public"."import_log" USING "btree"
 
 
 CREATE INDEX "monitor_row_beneficiary_hh_idx" ON "public"."monitor_row" USING "btree" ("beneficiary_hh_id") WHERE ("beneficiary_hh_id" IS NOT NULL);
+
+
+
+CREATE INDEX "monitor_row_monitor_beneficiary_idx" ON "public"."monitor_row" USING "btree" ("monitor_id", "beneficiary_hh_id") WHERE ("beneficiary_hh_id" IS NOT NULL);
 
 
 
@@ -1528,6 +1700,10 @@ CREATE OR REPLACE TRIGGER "staff_directory_set_updated_at" BEFORE UPDATE ON "pub
 
 
 CREATE OR REPLACE TRIGGER "staff_set_updated_at" BEFORE UPDATE ON "public"."staff" FOR EACH ROW EXECUTE FUNCTION "public"."set_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "user_smtp_config_delete_secret" AFTER DELETE ON "public"."user_smtp_config" FOR EACH ROW EXECUTE FUNCTION "public"."delete_user_smtp_secret"();
 
 
 
@@ -1663,6 +1839,11 @@ ALTER TABLE ONLY "public"."transfer_request"
 
 ALTER TABLE ONLY "public"."transfer_request"
     ADD CONSTRAINT "transfer_request_reviewed_by_fkey" FOREIGN KEY ("reviewed_by") REFERENCES "auth"."users"("id") ON DELETE SET NULL;
+
+
+
+ALTER TABLE ONLY "public"."user_smtp_config"
+    ADD CONSTRAINT "user_smtp_config_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "auth"."users"("id") ON DELETE CASCADE;
 
 
 
@@ -1917,6 +2098,9 @@ CREATE POLICY "transfer_request authenticated read" ON "public"."transfer_reques
 
 
 
+ALTER TABLE "public"."user_smtp_config" ENABLE ROW LEVEL SECURITY;
+
+
 
 
 ALTER PUBLICATION "supabase_realtime" OWNER TO "postgres";
@@ -2140,6 +2324,16 @@ GRANT ALL ON FUNCTION "public"."dashboard_municipality_metrics"("p_cluster" inte
 
 
 
+REVOKE ALL ON FUNCTION "public"."delete_user_smtp_secret"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."delete_user_smtp_secret"() TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."get_user_smtp_config"("p_user_id" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."get_user_smtp_config"("p_user_id" "uuid") TO "service_role";
+
+
+
 GRANT ALL ON FUNCTION "public"."gin_extract_query_trgm"("text", "internal", smallint, "internal", "internal", "internal", "internal") TO "postgres";
 GRANT ALL ON FUNCTION "public"."gin_extract_query_trgm"("text", "internal", smallint, "internal", "internal", "internal", "internal") TO "anon";
 GRANT ALL ON FUNCTION "public"."gin_extract_query_trgm"("text", "internal", smallint, "internal", "internal", "internal", "internal") TO "authenticated";
@@ -2283,6 +2477,11 @@ GRANT ALL ON FUNCTION "public"."set_limit"(real) TO "service_role";
 GRANT ALL ON FUNCTION "public"."set_updated_at"() TO "anon";
 GRANT ALL ON FUNCTION "public"."set_updated_at"() TO "authenticated";
 GRANT ALL ON FUNCTION "public"."set_updated_at"() TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."set_user_smtp_config"("p_user_id" "uuid", "p_host" "text", "p_port" integer, "p_username" "text", "p_password" "text", "p_from_addr" "text", "p_enabled" boolean) FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."set_user_smtp_config"("p_user_id" "uuid", "p_host" "text", "p_port" integer, "p_username" "text", "p_password" "text", "p_from_addr" "text", "p_enabled" boolean) TO "service_role";
 
 
 
@@ -2614,6 +2813,10 @@ GRANT ALL ON SEQUENCE "public"."transfer_referral_seq" TO "service_role";
 GRANT ALL ON TABLE "public"."transfer_request" TO "anon";
 GRANT ALL ON TABLE "public"."transfer_request" TO "authenticated";
 GRANT ALL ON TABLE "public"."transfer_request" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."user_smtp_config" TO "service_role";
 
 
 
