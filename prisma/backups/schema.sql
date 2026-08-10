@@ -173,6 +173,22 @@ $$;
 ALTER FUNCTION "public"."dashboard_municipality_metrics"("p_cluster" integer) OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."delete_system_resend_secret"() RETURNS "trigger"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+begin
+  if old.api_key_secret_id is not null then
+    delete from vault.secrets where id = old.api_key_secret_id;
+  end if;
+  return old;
+end;
+$$;
+
+
+ALTER FUNCTION "public"."delete_system_resend_secret"() OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."delete_user_smtp_secret"() RETURNS "trigger"
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO ''
@@ -187,6 +203,78 @@ $$;
 
 
 ALTER FUNCTION "public"."delete_user_smtp_secret"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."enforce_unique_account_employee_number"() RETURNS "trigger"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+declare
+  normalized_employee_no text;
+  conflicting_user_id uuid;
+begin
+  if new.employee_no is null or btrim(new.employee_no) = '' then
+    new.employee_no := null;
+    return new;
+  end if;
+
+  new.employee_no := upper(btrim(new.employee_no));
+  normalized_employee_no := lower(new.employee_no);
+
+  perform pg_advisory_xact_lock(
+    hashtextextended('account-employee-number:' || normalized_employee_no, 0)
+  );
+
+  if tg_table_name = 'registration_request' then
+    select s.user_id
+    into conflicting_user_id
+    from public.staff as s
+    where lower(btrim(s.employee_no)) = normalized_employee_no
+      and s.user_id <> new.user_id
+    limit 1;
+  elsif tg_table_name = 'staff' then
+    select rr.user_id
+    into conflicting_user_id
+    from public.registration_request as rr
+    where lower(btrim(rr.employee_no)) = normalized_employee_no
+      and rr.user_id <> new.user_id
+    limit 1;
+  end if;
+
+  if conflicting_user_id is not null then
+    raise exception using
+      errcode = '23505',
+      message = 'That employee number is already registered.',
+      constraint = 'unique_account_employee_number';
+  end if;
+
+  return new;
+end;
+$$;
+
+
+ALTER FUNCTION "public"."enforce_unique_account_employee_number"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."get_system_resend_config"() RETURNS TABLE("from_addr" "text", "reply_to" "text", "enabled" boolean, "has_api_key" boolean, "resend_api_key" "text", "updated_at" timestamp with time zone, "updated_by" "uuid")
+    LANGUAGE "sql" STABLE SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+  select
+    c.from_addr,
+    c.reply_to,
+    c.enabled,
+    c.api_key_secret_id is not null,
+    s.decrypted_secret,
+    c.updated_at,
+    c.updated_by
+  from public.system_resend_config c
+  left join vault.decrypted_secrets s on s.id = c.api_key_secret_id
+  where c.id = 1;
+$$;
+
+
+ALTER FUNCTION "public"."get_system_resend_config"() OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "public"."get_user_smtp_config"("p_user_id" "uuid") RETURNS TABLE("host" "text", "port" integer, "username" "text", "from_addr" "text", "enabled" boolean, "has_password" boolean, "smtp_password" "text", "updated_at" timestamp with time zone)
@@ -352,6 +440,61 @@ $$;
 
 
 ALTER FUNCTION "public"."refresh_grantee_lhf"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."set_system_resend_config"("p_api_key" "text", "p_from_addr" "text", "p_reply_to" "text", "p_enabled" boolean, "p_updated_by" "uuid") RETURNS "void"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+declare
+  v_secret_id uuid;
+begin
+  select c.api_key_secret_id
+    into v_secret_id
+  from public.system_resend_config c
+  where c.id = 1;
+
+  if nullif(btrim(p_api_key), '') is not null then
+    if v_secret_id is null then
+      select vault.create_secret(
+        btrim(p_api_key),
+        null,
+        'Cavite BDMS system Resend API key'
+      ) into v_secret_id;
+    else
+      perform vault.update_secret(v_secret_id, btrim(p_api_key));
+    end if;
+  end if;
+
+  insert into public.system_resend_config (
+    id,
+    api_key_secret_id,
+    from_addr,
+    reply_to,
+    enabled,
+    updated_at,
+    updated_by
+  ) values (
+    1,
+    v_secret_id,
+    nullif(btrim(p_from_addr), ''),
+    nullif(btrim(p_reply_to), ''),
+    coalesce(p_enabled, false),
+    now(),
+    p_updated_by
+  )
+  on conflict (id) do update set
+    api_key_secret_id = excluded.api_key_secret_id,
+    from_addr = excluded.from_addr,
+    reply_to = excluded.reply_to,
+    enabled = excluded.enabled,
+    updated_at = excluded.updated_at,
+    updated_by = excluded.updated_by;
+end;
+$$;
+
+
+ALTER FUNCTION "public"."set_system_resend_config"("p_api_key" "text", "p_from_addr" "text", "p_reply_to" "text", "p_enabled" boolean, "p_updated_by" "uuid") OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "public"."set_updated_at"() RETURNS "trigger"
@@ -980,12 +1123,33 @@ CREATE TABLE IF NOT EXISTS "public"."staff" (
     "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "supervisor_user_id" "uuid",
     "employee_no" "text",
-    "last_seen_at" timestamp with time zone,
+    "last_seen_at" timestamp with time zone DEFAULT "now"(),
+    "is_active" boolean DEFAULT true NOT NULL,
+    "deactivated_at" timestamp with time zone,
+    "deactivation_reason" "text",
+    "reactivated_at" timestamp with time zone,
+    CONSTRAINT "staff_deactivation_reason_check" CHECK ((("deactivation_reason" IS NULL) OR ("deactivation_reason" = ANY (ARRAY['inactive_30_days'::"text", 'admin'::"text"])))),
     CONSTRAINT "staff_role_check" CHECK (("role" = ANY (ARRAY['admin'::"text", 'provincial'::"text", 'swoIII'::"text", 'swoII'::"text", 'case_manager'::"text", 'social_welfare_assistant'::"text", 'poo_staff'::"text"])))
 );
 
 
 ALTER TABLE "public"."staff" OWNER TO "postgres";
+
+
+COMMENT ON COLUMN "public"."staff"."is_active" IS 'Application access gate. Inactive accounts must be reactivated by an administrator.';
+
+
+
+COMMENT ON COLUMN "public"."staff"."deactivated_at" IS 'When the account was most recently deactivated.';
+
+
+
+COMMENT ON COLUMN "public"."staff"."deactivation_reason" IS 'Reason for deactivation: inactive_30_days or admin.';
+
+
+
+COMMENT ON COLUMN "public"."staff"."reactivated_at" IS 'When an administrator most recently reactivated the account.';
+
 
 
 CREATE TABLE IF NOT EXISTS "public"."staff_directory" (
@@ -1189,6 +1353,21 @@ COMMENT ON COLUMN "public"."swdi_score"."fa2" IS 'Awareness of gender-based viol
 
 COMMENT ON COLUMN "public"."swdi_score"."fa3" IS 'Awareness of disaster risk reduction and management';
 
+
+
+CREATE TABLE IF NOT EXISTS "public"."system_resend_config" (
+    "id" smallint DEFAULT 1 NOT NULL,
+    "api_key_secret_id" "uuid",
+    "from_addr" "text",
+    "reply_to" "text",
+    "enabled" boolean DEFAULT false NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_by" "uuid",
+    CONSTRAINT "system_resend_config_id_check" CHECK (("id" = 1))
+);
+
+
+ALTER TABLE "public"."system_resend_config" OWNER TO "postgres";
 
 
 CREATE TABLE IF NOT EXISTS "public"."transfer_ack" (
@@ -1420,6 +1599,11 @@ ALTER TABLE ONLY "public"."swdi_score"
 
 
 
+ALTER TABLE ONLY "public"."system_resend_config"
+    ADD CONSTRAINT "system_resend_config_pkey" PRIMARY KEY ("id");
+
+
+
 ALTER TABLE ONLY "public"."transfer_ack"
     ADD CONSTRAINT "transfer_ack_pkey" PRIMARY KEY ("user_id", "transfer_id");
 
@@ -1607,7 +1791,15 @@ CREATE INDEX "municipality_cluster_id_idx" ON "public"."municipality" USING "btr
 
 
 
+CREATE UNIQUE INDEX "registration_request_employee_no_key" ON "public"."registration_request" USING "btree" ("lower"("btrim"("employee_no"))) WHERE (("employee_no" IS NOT NULL) AND ("btrim"("employee_no") <> ''::"text"));
+
+
+
 CREATE INDEX "registration_request_status_idx" ON "public"."registration_request" USING "btree" ("status");
+
+
+
+CREATE INDEX "staff_active_last_seen_idx" ON "public"."staff" USING "btree" ("last_seen_at") WHERE (("is_active" = true) AND ("role" <> 'admin'::"text"));
 
 
 
@@ -1623,7 +1815,7 @@ CREATE UNIQUE INDEX "staff_directory_name_muni_idx" ON "public"."staff_directory
 
 
 
-CREATE UNIQUE INDEX "staff_employee_no_key" ON "public"."staff" USING "btree" ("employee_no") WHERE ("employee_no" IS NOT NULL);
+CREATE UNIQUE INDEX "staff_employee_no_key" ON "public"."staff" USING "btree" ("lower"("btrim"("employee_no"))) WHERE (("employee_no" IS NOT NULL) AND ("btrim"("employee_no") <> ''::"text"));
 
 
 
@@ -1691,6 +1883,10 @@ CREATE OR REPLACE TRIGGER "monitor_set_updated_at" BEFORE UPDATE ON "public"."mo
 
 
 
+CREATE OR REPLACE TRIGGER "registration_request_unique_employee_number" BEFORE INSERT OR UPDATE OF "employee_no", "user_id" ON "public"."registration_request" FOR EACH ROW EXECUTE FUNCTION "public"."enforce_unique_account_employee_number"();
+
+
+
 CREATE OR REPLACE TRIGGER "staff_directory_compose_name" BEFORE INSERT OR UPDATE OF "first_name", "middle_name", "last_name" ON "public"."staff_directory" FOR EACH ROW EXECUTE FUNCTION "public"."staff_directory_compose_name"();
 
 
@@ -1700,6 +1896,14 @@ CREATE OR REPLACE TRIGGER "staff_directory_set_updated_at" BEFORE UPDATE ON "pub
 
 
 CREATE OR REPLACE TRIGGER "staff_set_updated_at" BEFORE UPDATE ON "public"."staff" FOR EACH ROW EXECUTE FUNCTION "public"."set_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "staff_unique_employee_number" BEFORE INSERT OR UPDATE OF "employee_no", "user_id" ON "public"."staff" FOR EACH ROW EXECUTE FUNCTION "public"."enforce_unique_account_employee_number"();
+
+
+
+CREATE OR REPLACE TRIGGER "system_resend_config_delete_secret" AFTER DELETE ON "public"."system_resend_config" FOR EACH ROW EXECUTE FUNCTION "public"."delete_system_resend_secret"();
 
 
 
@@ -1819,6 +2023,11 @@ ALTER TABLE ONLY "public"."swdi_encoding"
 
 ALTER TABLE ONLY "public"."swdi_score"
     ADD CONSTRAINT "swdi_score_hh_id_fkey" FOREIGN KEY ("hh_id") REFERENCES "public"."grantee_list"("hh_id") ON UPDATE CASCADE ON DELETE SET NULL;
+
+
+
+ALTER TABLE ONLY "public"."system_resend_config"
+    ADD CONSTRAINT "system_resend_config_updated_by_fkey" FOREIGN KEY ("updated_by") REFERENCES "auth"."users"("id") ON DELETE SET NULL;
 
 
 
@@ -2076,6 +2285,9 @@ CREATE POLICY "swdi_score scoped write" ON "public"."swdi_score" TO "authenticat
 
 
 
+ALTER TABLE "public"."system_resend_config" ENABLE ROW LEVEL SECURITY;
+
+
 ALTER TABLE "public"."transfer_ack" ENABLE ROW LEVEL SECURITY;
 
 
@@ -2324,8 +2536,24 @@ GRANT ALL ON FUNCTION "public"."dashboard_municipality_metrics"("p_cluster" inte
 
 
 
+REVOKE ALL ON FUNCTION "public"."delete_system_resend_secret"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."delete_system_resend_secret"() TO "service_role";
+
+
+
 REVOKE ALL ON FUNCTION "public"."delete_user_smtp_secret"() FROM PUBLIC;
 GRANT ALL ON FUNCTION "public"."delete_user_smtp_secret"() TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."enforce_unique_account_employee_number"() TO "anon";
+GRANT ALL ON FUNCTION "public"."enforce_unique_account_employee_number"() TO "authenticated";
+GRANT ALL ON FUNCTION "public"."enforce_unique_account_employee_number"() TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."get_system_resend_config"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."get_system_resend_config"() TO "service_role";
 
 
 
@@ -2471,6 +2699,11 @@ GRANT ALL ON FUNCTION "public"."set_limit"(real) TO "postgres";
 GRANT ALL ON FUNCTION "public"."set_limit"(real) TO "anon";
 GRANT ALL ON FUNCTION "public"."set_limit"(real) TO "authenticated";
 GRANT ALL ON FUNCTION "public"."set_limit"(real) TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."set_system_resend_config"("p_api_key" "text", "p_from_addr" "text", "p_reply_to" "text", "p_enabled" boolean, "p_updated_by" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."set_system_resend_config"("p_api_key" "text", "p_from_addr" "text", "p_reply_to" "text", "p_enabled" boolean, "p_updated_by" "uuid") TO "service_role";
 
 
 
@@ -2795,6 +3028,10 @@ GRANT ALL ON TABLE "public"."swdi_encoding" TO "service_role";
 GRANT ALL ON TABLE "public"."swdi_score" TO "anon";
 GRANT ALL ON TABLE "public"."swdi_score" TO "authenticated";
 GRANT ALL ON TABLE "public"."swdi_score" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."system_resend_config" TO "service_role";
 
 
 
