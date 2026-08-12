@@ -63,39 +63,22 @@ CREATE OR REPLACE FUNCTION "private"."ipcr_can_edit_monitor_row"("target_hh_id" 
     SET "search_path" TO ''
     AS $$
   select (select private.ipcr_is_editor()) or (
-    target_hh_id is not null
+    (select auth.uid()) is not null
     and exists (
       select 1
       from public.staff_municipality sm
       where sm.user_id = (select auth.uid())
         and sm.municipality = target_municipality
     )
-    and exists (
-      select 1
-      from public.ipcr_household_assignment a
-      join public.ipcr_period p on p.id = a.period_id
-      where a.hh_id = target_hh_id
-        and a.effective_to is null
-        and p.status = 'published'
-        and current_date between p.starts_on and p.ends_on
-        and (
-          a.responsible_cm_user_id = (select auth.uid())
-          or exists (
-            select 1
-            from public.ipcr_supervision sp
-            where sp.period_id = a.period_id
-              and sp.municipality = target_municipality
-              and sp.case_manager_user_id = a.responsible_cm_user_id
-              and sp.swa_user_id = (select auth.uid())
-              and sp.status = 'approved'
-          )
-        )
-    )
   );
 $$;
 
 
 ALTER FUNCTION "private"."ipcr_can_edit_monitor_row"("target_hh_id" "text", "target_municipality" "text") OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "private"."ipcr_can_edit_monitor_row"("target_hh_id" "text", "target_municipality" "text") IS 'Allows monitoring edits by editors or staff assigned to the row municipality; HHID caseload ownership is used only for assignment and attribution.';
+
 
 
 CREATE OR REPLACE FUNCTION "private"."ipcr_can_view_all_monitor_rows"() RETURNS boolean
@@ -811,6 +794,101 @@ $$;
 ALTER FUNCTION "public"."ipcr_publish_period"("p_period_id" "uuid", "p_actor_id" "uuid") OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."ipcr_remove_household_assignment"("p_period_id" "uuid", "p_hh_id" "text", "p_actor_id" "uuid") RETURNS boolean
+    LANGUAGE "plpgsql"
+    SET "search_path" TO ''
+    AS $$
+declare
+  v_rule public.ipcr_assignment_rule%rowtype;
+  v_actor_role text;
+  v_is_editor boolean := false;
+  v_now timestamptz := now();
+begin
+  select s.role
+  into v_actor_role
+  from public.staff s
+  where s.user_id = p_actor_id
+    and s.is_active = true;
+
+  v_is_editor := coalesce(
+    v_actor_role in ('admin', 'provincial', 'swoIII', 'swoII'),
+    false
+  );
+
+  if exists (
+    select 1
+    from public.ipcr_period p
+    where p.id = p_period_id
+      and p.status = 'closed'
+  ) then
+    raise exception 'Archived assignment periods are read-only';
+  end if;
+
+  select r.*
+  into v_rule
+  from public.ipcr_assignment_rule r
+  where r.period_id = p_period_id
+    and r.scope_type = 'hhid'
+    and r.barangay_key = ''
+    and r.scope_value_key = upper(btrim(p_hh_id))
+    and r.status in ('draft', 'published')
+  for update;
+
+  if v_rule.id is null then
+    raise exception 'Active HHID assignment not found';
+  end if;
+
+  if not v_is_editor and (
+    v_actor_role is distinct from 'case_manager'
+    or v_rule.responsible_cm_user_id is distinct from p_actor_id
+  ) then
+    raise exception 'You can remove only your own household assignment';
+  end if;
+
+  update public.ipcr_assignment_rule
+  set status = 'retired', updated_at = v_now
+  where id = v_rule.id;
+
+  update public.ipcr_household_assignment
+  set effective_to = v_now
+  where period_id = p_period_id
+    and upper(btrim(hh_id)) = upper(btrim(p_hh_id))
+    and effective_to is null;
+
+  insert into public.ipcr_assignment_audit (
+    period_id,
+    entity_type,
+    entity_id,
+    action,
+    actor_user_id,
+    before_data,
+    after_data
+  ) values (
+    p_period_id,
+    'household_assignment',
+    p_hh_id,
+    'removed',
+    p_actor_id,
+    jsonb_build_object(
+      'rule_id', v_rule.id,
+      'responsible_cm_user_id', v_rule.responsible_cm_user_id,
+      'status', v_rule.status
+    ),
+    jsonb_build_object('status', 'retired')
+  );
+
+  return true;
+end;
+$$;
+
+
+ALTER FUNCTION "public"."ipcr_remove_household_assignment"("p_period_id" "uuid", "p_hh_id" "text", "p_actor_id" "uuid") OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."ipcr_remove_household_assignment"("p_period_id" "uuid", "p_hh_id" "text", "p_actor_id" "uuid") IS 'Removes one exact-HHID assignment owned by the acting Case Manager or an editor without querying the protected auth schema; monitoring rows are preserved.';
+
+
+
 CREATE OR REPLACE FUNCTION "public"."ipcr_review_all_proposals"("p_period_id" "uuid", "p_decision" "text", "p_actor_id" "uuid") RETURNS TABLE("reviewed_count" integer, "rule_count" integer)
     LANGUAGE "plpgsql"
     SET "search_path" TO ''
@@ -924,26 +1002,60 @@ $$;
 ALTER FUNCTION "public"."ipcr_review_all_proposals"("p_period_id" "uuid", "p_decision" "text", "p_actor_id" "uuid") OWNER TO "postgres";
 
 
-CREATE OR REPLACE FUNCTION "public"."ipcr_search_households"("p_period_id" "uuid", "p_municipality" "text" DEFAULT NULL::"text", "p_barangay" "text" DEFAULT NULL::"text", "p_set_group" "text" DEFAULT NULL::"text", "p_query" "text" DEFAULT NULL::"text", "p_assignment" "text" DEFAULT 'all'::"text", "p_user_id" "uuid" DEFAULT NULL::"uuid", "p_limit" integer DEFAULT 40, "p_offset" integer DEFAULT 0) RETURNS TABLE("hh_id" "text", "grantee_name" "text", "municipality" "text", "barangay" "text", "set_group" "text", "primary_worker_user_id" "uuid", "responsible_cm_user_id" "uuid", "source_rule_id" "uuid", "monitor_count" bigint, "total_count" bigint)
+CREATE OR REPLACE FUNCTION "public"."ipcr_search_households"("p_period_id" "uuid", "p_municipality" "text" DEFAULT NULL::"text", "p_barangay" "text" DEFAULT NULL::"text", "p_set_group" "text" DEFAULT NULL::"text", "p_query" "text" DEFAULT NULL::"text", "p_assignment" "text" DEFAULT 'all'::"text", "p_user_id" "uuid" DEFAULT NULL::"uuid", "p_monitoring" "text" DEFAULT 'all'::"text", "p_limit" integer DEFAULT 40, "p_offset" integer DEFAULT 0) RETURNS TABLE("hh_id" "text", "grantee_name" "text", "municipality" "text", "barangay" "text", "set_group" "text", "primary_worker_user_id" "uuid", "responsible_cm_user_id" "uuid", "source_rule_id" "uuid", "monitor_count" bigint, "total_count" bigint)
     LANGUAGE "sql" STABLE SECURITY DEFINER
     SET "search_path" TO ''
     AS $$
+  with assignment_candidates as materialized (
+    select
+      r.scope_value as hh_id,
+      r.primary_worker_user_id,
+      r.responsible_cm_user_id,
+      r.id as source_rule_id,
+      2 as priority
+    from public.ipcr_assignment_rule r
+    where r.period_id = p_period_id
+      and r.scope_type = 'hhid'
+      and r.barangay_key = ''
+      and r.status in ('draft', 'published')
+    union all
+    select
+      a.hh_id,
+      a.primary_worker_user_id,
+      a.responsible_cm_user_id,
+      a.source_rule_id,
+      1 as priority
+    from public.ipcr_household_assignment a
+    where a.period_id = p_period_id
+      and a.effective_to is null
+  ), effective_assignments as materialized (
+    select distinct on (candidate.hh_id)
+      candidate.hh_id,
+      candidate.primary_worker_user_id,
+      candidate.responsible_cm_user_id,
+      candidate.source_rule_id
+    from assignment_candidates candidate
+    order by candidate.hh_id, candidate.priority desc
+  ), monitor_counts as materialized (
+    select mr.beneficiary_hh_id as hh_id, count(*)::bigint as monitor_count
+    from public.monitor_row mr
+    where mr.beneficiary_hh_id is not null
+    group by mr.beneficiary_hh_id
+  )
   select
     g.hh_id,
     g.grantee_name,
     g.municipality,
     g.barangay,
     g.set_group,
-    a.primary_worker_user_id,
-    a.responsible_cm_user_id,
-    a.source_rule_id,
-    (select count(*) from public.monitor_row mr where mr.beneficiary_hh_id = g.hh_id) as monitor_count,
+    assignment.primary_worker_user_id,
+    assignment.responsible_cm_user_id,
+    assignment.source_rule_id,
+    coalesce(monitors.monitor_count, 0)::bigint,
     count(*) over () as total_count
   from public.grantee_list g
-  left join public.ipcr_household_assignment a
-    on a.period_id = p_period_id
-   and a.hh_id = g.hh_id
-   and a.effective_to is null
+  left join effective_assignments assignment on assignment.hh_id = g.hh_id
+  left join monitor_counts monitors on monitors.hh_id = g.hh_id
   where (p_municipality is null or g.municipality = p_municipality)
     and (
       p_barangay is null
@@ -959,19 +1071,24 @@ CREATE OR REPLACE FUNCTION "public"."ipcr_search_households"("p_period_id" "uuid
       or g.grantee_name ilike '%' || p_query || '%'
     )
     and case p_assignment
-      when 'assigned' then a.id is not null
-      when 'unassigned' then a.id is null
+      when 'assigned' then assignment.hh_id is not null
+      when 'unassigned' then assignment.hh_id is null
       when 'mine' then
-        a.responsible_cm_user_id = p_user_id
+        assignment.responsible_cm_user_id = p_user_id
         or exists (
           select 1
           from public.ipcr_supervision sp
           where sp.period_id = p_period_id
             and sp.municipality = g.municipality
-            and sp.case_manager_user_id = a.responsible_cm_user_id
+            and sp.case_manager_user_id = assignment.responsible_cm_user_id
             and sp.swa_user_id = p_user_id
             and sp.status = 'approved'
         )
+      else true
+    end
+    and case p_monitoring
+      when 'with' then monitors.hh_id is not null
+      when 'without' then monitors.hh_id is null
       else true
     end
   order by g.municipality, g.barangay, g.grantee_name, g.hh_id
@@ -980,7 +1097,11 @@ CREATE OR REPLACE FUNCTION "public"."ipcr_search_households"("p_period_id" "uuid
 $$;
 
 
-ALTER FUNCTION "public"."ipcr_search_households"("p_period_id" "uuid", "p_municipality" "text", "p_barangay" "text", "p_set_group" "text", "p_query" "text", "p_assignment" "text", "p_user_id" "uuid", "p_limit" integer, "p_offset" integer) OWNER TO "postgres";
+ALTER FUNCTION "public"."ipcr_search_households"("p_period_id" "uuid", "p_municipality" "text", "p_barangay" "text", "p_set_group" "text", "p_query" "text", "p_assignment" "text", "p_user_id" "uuid", "p_monitoring" "text", "p_limit" integer, "p_offset" integer) OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."ipcr_search_households"("p_period_id" "uuid", "p_municipality" "text", "p_barangay" "text", "p_set_group" "text", "p_query" "text", "p_assignment" "text", "p_user_id" "uuid", "p_monitoring" "text", "p_limit" integer, "p_offset" integer) IS 'Searches Caseload Inventory households using pre-aggregated Working ownership and monitoring-entry counts.';
+
 
 
 CREATE OR REPLACE FUNCTION "public"."ipcr_set_group_options"() RETURNS TABLE("set_group" "text")
@@ -996,6 +1117,42 @@ $$;
 
 
 ALTER FUNCTION "public"."ipcr_set_group_options"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."ipcr_working_assignment_count"("p_period_id" "uuid", "p_municipalities" "text"[] DEFAULT NULL::"text"[]) RETURNS bigint
+    LANGUAGE "sql" STABLE SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+  select count(*)
+  from (
+    select upper(btrim(r.scope_value)) as hh_key
+    from public.ipcr_assignment_rule r
+    where r.period_id = p_period_id
+      and r.scope_type = 'hhid'
+      and r.barangay_key = ''
+      and r.status in ('draft', 'published')
+      and (
+        p_municipalities is null
+        or r.municipality = any(p_municipalities)
+      )
+    union
+    select upper(btrim(a.hh_id)) as hh_key
+    from public.ipcr_household_assignment a
+    where a.period_id = p_period_id
+      and a.effective_to is null
+      and (
+        p_municipalities is null
+        or a.municipality = any(p_municipalities)
+      )
+  ) effective_assignments;
+$$;
+
+
+ALTER FUNCTION "public"."ipcr_working_assignment_count"("p_period_id" "uuid", "p_municipalities" "text"[]) OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."ipcr_working_assignment_count"("p_period_id" "uuid", "p_municipalities" "text"[]) IS 'Counts unique HHIDs assigned by Working rules or current materialized assignments.';
+
 
 
 CREATE OR REPLACE FUNCTION "public"."monitor_caller_can_edit_muni"("target_muni" "text") RETURNS boolean
@@ -3892,18 +4049,28 @@ GRANT ALL ON FUNCTION "public"."ipcr_publish_period"("p_period_id" "uuid", "p_ac
 
 
 
+REVOKE ALL ON FUNCTION "public"."ipcr_remove_household_assignment"("p_period_id" "uuid", "p_hh_id" "text", "p_actor_id" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."ipcr_remove_household_assignment"("p_period_id" "uuid", "p_hh_id" "text", "p_actor_id" "uuid") TO "service_role";
+
+
+
 REVOKE ALL ON FUNCTION "public"."ipcr_review_all_proposals"("p_period_id" "uuid", "p_decision" "text", "p_actor_id" "uuid") FROM PUBLIC;
 GRANT ALL ON FUNCTION "public"."ipcr_review_all_proposals"("p_period_id" "uuid", "p_decision" "text", "p_actor_id" "uuid") TO "service_role";
 
 
 
-REVOKE ALL ON FUNCTION "public"."ipcr_search_households"("p_period_id" "uuid", "p_municipality" "text", "p_barangay" "text", "p_set_group" "text", "p_query" "text", "p_assignment" "text", "p_user_id" "uuid", "p_limit" integer, "p_offset" integer) FROM PUBLIC;
-GRANT ALL ON FUNCTION "public"."ipcr_search_households"("p_period_id" "uuid", "p_municipality" "text", "p_barangay" "text", "p_set_group" "text", "p_query" "text", "p_assignment" "text", "p_user_id" "uuid", "p_limit" integer, "p_offset" integer) TO "service_role";
+REVOKE ALL ON FUNCTION "public"."ipcr_search_households"("p_period_id" "uuid", "p_municipality" "text", "p_barangay" "text", "p_set_group" "text", "p_query" "text", "p_assignment" "text", "p_user_id" "uuid", "p_monitoring" "text", "p_limit" integer, "p_offset" integer) FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."ipcr_search_households"("p_period_id" "uuid", "p_municipality" "text", "p_barangay" "text", "p_set_group" "text", "p_query" "text", "p_assignment" "text", "p_user_id" "uuid", "p_monitoring" "text", "p_limit" integer, "p_offset" integer) TO "service_role";
 
 
 
 REVOKE ALL ON FUNCTION "public"."ipcr_set_group_options"() FROM PUBLIC;
 GRANT ALL ON FUNCTION "public"."ipcr_set_group_options"() TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."ipcr_working_assignment_count"("p_period_id" "uuid", "p_municipalities" "text"[]) FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."ipcr_working_assignment_count"("p_period_id" "uuid", "p_municipalities" "text"[]) TO "service_role";
 
 
 
