@@ -180,6 +180,62 @@ $$;
 ALTER FUNCTION "private"."ipcr_is_editor"() OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "private"."ipcr_monitor_kpi_matches"("p_kpi" "jsonb", "p_data" "jsonb", "p_values" "jsonb") RETURNS boolean
+    LANGUAGE "sql" IMMUTABLE
+    SET "search_path" TO ''
+    AS $$
+  with rule as (
+    select
+      coalesce(p_kpi #>> '{match,op}', '') as op,
+      coalesce(p_kpi #>> '{match,value}', '') as expected,
+      case
+        when jsonb_typeof(p_kpi #> '{match,values}') = 'array'
+        then p_kpi #> '{match,values}'
+        else '[]'::jsonb
+      end as expected_values,
+      case
+        when coalesce(p_kpi #>> '{match,columnKey}', '') <> '' then
+          coalesce(p_data ->> (p_kpi #>> '{match,columnKey}'), '')
+        else
+          coalesce(p_values ->> (p_kpi #>> '{match,fieldKey}'), '')
+      end as actual
+  )
+  select case rule.op
+    when 'set' then btrim(rule.actual) <> ''
+    when 'notset' then btrim(rule.actual) = ''
+    when 'eq' then
+      case
+        when jsonb_typeof(rule.expected_values) = 'array'
+          and jsonb_array_length(rule.expected_values) > 0
+        then exists (
+          select 1
+          from jsonb_array_elements_text(rule.expected_values) choice(value)
+          where choice.value = rule.actual
+        )
+        else rule.actual = rule.expected
+      end
+    when 'neq' then
+      case
+        when jsonb_typeof(rule.expected_values) = 'array'
+          and jsonb_array_length(rule.expected_values) > 0
+        then not exists (
+          select 1
+          from jsonb_array_elements_text(rule.expected_values) choice(value)
+          where choice.value = rule.actual
+        )
+        else rule.actual <> rule.expected
+      end
+    when 'true' then rule.actual = 'true'
+    when 'false' then rule.actual <> 'true'
+    else false
+  end
+  from rule;
+$$;
+
+
+ALTER FUNCTION "private"."ipcr_monitor_kpi_matches"("p_kpi" "jsonb", "p_data" "jsonb", "p_values" "jsonb") OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "private"."ipcr_visible_municipalities"() RETURNS "text"[]
     LANGUAGE "sql" STABLE SECURITY DEFINER
     SET "search_path" TO ''
@@ -518,6 +574,243 @@ $$;
 
 
 ALTER FUNCTION "public"."grantee_status_counts"("p_cluster" integer) OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."ipcr_my_caseload_scorecard"("p_period_id" "uuid", "p_user_id" "uuid") RETURNS TABLE("caseload_households" bigint, "monitoring_entries" bigint, "accomplished_entries" bigint, "variance_entries" bigint)
+    LANGUAGE "sql" STABLE SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+  with assignment_candidates as materialized (
+    select
+      r.scope_value as hh_id,
+      r.municipality,
+      r.primary_worker_user_id,
+      r.responsible_cm_user_id,
+      2 as priority
+    from public.ipcr_assignment_rule r
+    where r.period_id = p_period_id
+      and r.scope_type = 'hhid'
+      and r.barangay_key = ''
+      and r.status in ('draft', 'published')
+
+    union all
+
+    select
+      a.hh_id,
+      a.municipality,
+      a.primary_worker_user_id,
+      a.responsible_cm_user_id,
+      1 as priority
+    from public.ipcr_household_assignment a
+    where a.period_id = p_period_id
+      and a.effective_to is null
+  ), effective_assignments as materialized (
+    select distinct on (candidate.hh_id)
+      candidate.hh_id,
+      candidate.municipality,
+      candidate.primary_worker_user_id,
+      candidate.responsible_cm_user_id
+    from assignment_candidates candidate
+    order by candidate.hh_id, candidate.priority desc
+  ), my_households as materialized (
+    select assignment.hh_id
+    from effective_assignments assignment
+    where assignment.responsible_cm_user_id = p_user_id
+       or assignment.primary_worker_user_id = p_user_id
+       or exists (
+         select 1
+         from public.ipcr_supervision supervision
+         where supervision.period_id = p_period_id
+           and supervision.municipality = assignment.municipality
+           and supervision.case_manager_user_id = assignment.responsible_cm_user_id
+           and supervision.swa_user_id = p_user_id
+           and supervision.status = 'approved'
+       )
+  ), monitoring_targets as materialized (
+    select
+      mr.id,
+      coalesce(mr.data, '{}'::jsonb) as row_data,
+      coalesce(mr.values, '{}'::jsonb) as row_values,
+      case
+        when jsonb_typeof(monitor.fields) = 'array' then monitor.fields
+        else '[]'::jsonb
+      end as fields,
+      case
+        when jsonb_typeof(monitor.kpis) = 'array' then monitor.kpis
+        else '[]'::jsonb
+      end as kpis,
+      monitor.client_status_key
+    from public.monitor_row mr
+    join my_households household
+      on household.hh_id = mr.beneficiary_hh_id
+    join public.monitor monitor
+      on monitor.id = mr.monitor_id
+    where monitor.active = true
+      and coalesce(monitor.status, 'open') <> 'hidden'
+  ), auto_status as (
+    select
+      target.*,
+      (
+        -- Auto-accomplished KPI rules always feed My Caseload Accomplished.
+        exists (
+          select 1
+          from jsonb_array_elements(target.kpis) kpi(value)
+          where coalesce(kpi.value ->> 'disabled', 'false') <> 'true'
+            and coalesce(kpi.value ->> 'autoAccomplished', 'false') = 'true'
+            and private.ipcr_monitor_kpi_matches(
+              kpi.value,
+              target.row_data,
+              target.row_values
+            )
+        )
+        or (
+          -- Preserve legacy Approved TOR behavior until an editor saves an
+          -- explicit auto-accomplished configuration.
+          target.client_status_key is not null
+          and not exists (
+            select 1
+            from jsonb_array_elements(target.kpis) kpi(value)
+            where kpi.value ->> 'key' = '__approved_tor_auto__'
+               or kpi.value ? 'autoAccomplished'
+          )
+          and target.row_data ->> target.client_status_key = 'Approved TOR'
+        )
+      ) as auto_accomplished
+    from monitoring_targets target
+  ), kpi_status as (
+    select
+      target.id,
+      target.auto_accomplished,
+      exists (
+        select 1
+        from jsonb_array_elements(target.kpis) kpi(value)
+        where coalesce(kpi.value ->> 'disabled', 'false') <> 'true'
+          and (
+            coalesce(kpi.value ->> 'autoAccomplished', 'false') = 'true'
+            or kpi.value ->> 'scorecardRole' = 'accomplished'
+            or (
+              not (kpi.value ? 'scorecardRole')
+              and lower(btrim(coalesce(kpi.value ->> 'label', ''))) = 'accomplished'
+            )
+          )
+      ) as has_accomplished_mapping,
+      (
+        target.auto_accomplished
+        or exists (
+          select 1
+          from jsonb_array_elements(target.kpis) kpi(value)
+          where coalesce(kpi.value ->> 'disabled', 'false') <> 'true'
+            and (
+              kpi.value ->> 'scorecardRole' = 'accomplished'
+              or (
+                not (kpi.value ? 'scorecardRole')
+                and lower(btrim(coalesce(kpi.value ->> 'label', ''))) = 'accomplished'
+              )
+            )
+            and private.ipcr_monitor_kpi_matches(
+              kpi.value,
+              target.row_data,
+              target.row_values
+            )
+            and (
+              coalesce(kpi.value ->> 'excludeAutoAccomplished', 'false') <> 'true'
+              or not target.auto_accomplished
+            )
+        )
+      ) as mapped_accomplished,
+      exists (
+        select 1
+        from jsonb_array_elements(target.kpis) kpi(value)
+        where coalesce(kpi.value ->> 'disabled', 'false') <> 'true'
+          and (
+            kpi.value ->> 'scorecardRole' = 'variance'
+            or (
+              not (kpi.value ? 'scorecardRole')
+              and lower(btrim(coalesce(kpi.value ->> 'label', ''))) = 'variance'
+            )
+          )
+      ) as has_variance_mapping,
+      exists (
+        select 1
+        from jsonb_array_elements(target.kpis) kpi(value)
+        where coalesce(kpi.value ->> 'disabled', 'false') <> 'true'
+          and (
+            kpi.value ->> 'scorecardRole' = 'variance'
+            or (
+              not (kpi.value ? 'scorecardRole')
+              and lower(btrim(coalesce(kpi.value ->> 'label', ''))) = 'variance'
+            )
+          )
+          and private.ipcr_monitor_kpi_matches(
+            kpi.value,
+            target.row_data,
+            target.row_values
+          )
+          and (
+            coalesce(kpi.value ->> 'excludeAutoAccomplished', 'false') <> 'true'
+            or not target.auto_accomplished
+          )
+      ) as mapped_variance,
+      case
+        when exists (
+          select 1
+          from jsonb_array_elements(target.fields) field(value)
+          where coalesce(field.value ->> 'required', 'false') = 'true'
+            and coalesce(field.value ->> 'editorOnly', 'false') <> 'true'
+            and coalesce(field.value ->> 'type', '') <> 'checkbox'
+        ) then not exists (
+          select 1
+          from jsonb_array_elements(target.fields) field(value)
+          where coalesce(field.value ->> 'required', 'false') = 'true'
+            and coalesce(field.value ->> 'editorOnly', 'false') <> 'true'
+            and coalesce(field.value ->> 'type', '') <> 'checkbox'
+            and btrim(coalesce(target.row_values ->> (field.value ->> 'key'), '')) = ''
+        )
+        else exists (
+          select 1
+          from jsonb_array_elements(target.fields) field(value)
+          where coalesce(field.value ->> 'editorOnly', 'false') <> 'true'
+            and coalesce(field.value ->> 'type', '') <> 'checkbox'
+            and btrim(coalesce(target.row_values ->> (field.value ->> 'key'), '')) <> ''
+        )
+      end as fallback_accomplished
+    from auto_status target
+  ), completion_status as (
+    select
+      status.id,
+      status.has_variance_mapping,
+      status.mapped_variance,
+      (
+        status.mapped_accomplished
+        or (
+          not status.has_accomplished_mapping
+          and status.fallback_accomplished
+        )
+      ) as accomplished
+    from kpi_status status
+  ), classified as (
+    select
+      status.id,
+      status.accomplished,
+      case
+        when status.has_variance_mapping then status.mapped_variance
+        else not status.accomplished
+      end as variance
+    from completion_status status
+  )
+  select
+    (select count(*) from my_households)::bigint,
+    (select count(*) from classified)::bigint,
+    (select count(*) from classified where accomplished)::bigint,
+    (select count(*) from classified where variance)::bigint;
+$$;
+
+
+ALTER FUNCTION "public"."ipcr_my_caseload_scorecard"("p_period_id" "uuid", "p_user_id" "uuid") OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."ipcr_my_caseload_scorecard"("p_period_id" "uuid", "p_user_id" "uuid") IS 'Returns assigned HHIDs and monitoring entry accomplishment totals for one staff member and assignment period.';
+
 
 
 CREATE OR REPLACE FUNCTION "public"."ipcr_publish_period"("p_period_id" "uuid", "p_actor_id" "uuid") RETURNS "jsonb"
@@ -3873,6 +4166,11 @@ GRANT ALL ON FUNCTION "private"."ipcr_is_editor"() TO "service_role";
 
 
 
+REVOKE ALL ON FUNCTION "private"."ipcr_monitor_kpi_matches"("p_kpi" "jsonb", "p_data" "jsonb", "p_values" "jsonb") FROM PUBLIC;
+GRANT ALL ON FUNCTION "private"."ipcr_monitor_kpi_matches"("p_kpi" "jsonb", "p_data" "jsonb", "p_values" "jsonb") TO "service_role";
+
+
+
 REVOKE ALL ON FUNCTION "private"."ipcr_visible_municipalities"() FROM PUBLIC;
 GRANT ALL ON FUNCTION "private"."ipcr_visible_municipalities"() TO "authenticated";
 GRANT ALL ON FUNCTION "private"."ipcr_visible_municipalities"() TO "service_role";
@@ -4041,6 +4339,11 @@ GRANT ALL ON FUNCTION "public"."gtrgm_union"("internal", "internal") TO "postgre
 GRANT ALL ON FUNCTION "public"."gtrgm_union"("internal", "internal") TO "anon";
 GRANT ALL ON FUNCTION "public"."gtrgm_union"("internal", "internal") TO "authenticated";
 GRANT ALL ON FUNCTION "public"."gtrgm_union"("internal", "internal") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."ipcr_my_caseload_scorecard"("p_period_id" "uuid", "p_user_id" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."ipcr_my_caseload_scorecard"("p_period_id" "uuid", "p_user_id" "uuid") TO "service_role";
 
 
 
