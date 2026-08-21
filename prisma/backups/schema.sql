@@ -58,6 +58,62 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp" WITH SCHEMA "extensions";
 
 
 
+CREATE OR REPLACE FUNCTION "private"."concurrence_case_id"("p_hhid" "text", "p_episode_at" timestamp without time zone) RETURNS "text"
+    LANGUAGE "sql" IMMUTABLE
+    SET "search_path" TO ''
+    AS $$
+  select 'CONC-' || private.concurrence_normalize_hhid(p_hhid) || '-'
+    || pg_catalog.to_char(p_episode_at, 'YYYYMMDDHH24MISS');
+$$;
+
+
+ALTER FUNCTION "private"."concurrence_case_id"("p_hhid" "text", "p_episode_at" timestamp without time zone) OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "private"."concurrence_normalize_hhid"("p_value" "text") RETURNS "text"
+    LANGUAGE "sql" IMMUTABLE
+    SET "search_path" TO ''
+    AS $$
+  select upper(regexp_replace(btrim(coalesce(p_value, '')), '\s+', '', 'g'));
+$$;
+
+
+ALTER FUNCTION "private"."concurrence_normalize_hhid"("p_value" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "private"."concurrence_parse_timestamp"("p_value" "text") RETURNS timestamp without time zone
+    LANGUAGE "plpgsql" IMMUTABLE
+    SET "search_path" TO ''
+    AS $_$
+declare
+  normalized text := btrim(coalesce(p_value, ''));
+  parsed timestamp without time zone;
+begin
+  if normalized !~ '^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$' then
+    return null;
+  end if;
+
+  begin
+    parsed := pg_catalog.make_timestamp(
+      substring(normalized from 1 for 4)::integer,
+      substring(normalized from 6 for 2)::integer,
+      substring(normalized from 9 for 2)::integer,
+      substring(normalized from 12 for 2)::integer,
+      substring(normalized from 15 for 2)::integer,
+      substring(normalized from 18 for 2)::double precision
+    );
+  exception when others then
+    return null;
+  end;
+
+  return parsed;
+end;
+$_$;
+
+
+ALTER FUNCTION "private"."concurrence_parse_timestamp"("p_value" "text") OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "private"."ipcr_can_edit_monitor_row"("target_hh_id" "text", "target_municipality" "text") RETURNS boolean
     LANGUAGE "sql" STABLE SECURITY DEFINER
     SET "search_path" TO ''
@@ -250,6 +306,1155 @@ $$;
 
 
 ALTER FUNCTION "private"."ipcr_visible_municipalities"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "private"."monitor_csv_field_is_visible"("p_field_key" "text", "p_values" "jsonb", "p_data" "jsonb", "p_fields" "jsonb", "p_visiting" "text"[] DEFAULT ARRAY[]::"text"[]) RETURNS boolean
+    LANGUAGE "plpgsql" IMMUTABLE
+    SET "search_path" TO ''
+    AS $$
+declare
+  field_config jsonb;
+  conditions jsonb;
+  condition_config jsonb;
+  controller_key text;
+  column_key text;
+  operator text;
+  raw_value jsonb;
+  text_value text;
+  checked boolean;
+  matches boolean;
+  is_any boolean := false;
+begin
+  if p_field_key = any(coalesce(p_visiting, array[]::text[])) then
+    return false;
+  end if;
+
+  select item
+    into field_config
+    from pg_catalog.jsonb_array_elements(coalesce(p_fields, '[]'::jsonb)) as item
+   where item ->> 'key' = p_field_key
+   limit 1;
+
+  -- An unknown field is not eligible for conditional clearing.
+  if field_config is null then
+    return true;
+  end if;
+
+  if pg_catalog.jsonb_typeof(field_config -> 'visibleWhenAny') = 'array'
+     and pg_catalog.jsonb_array_length(field_config -> 'visibleWhenAny') > 0 then
+    conditions := field_config -> 'visibleWhenAny';
+    is_any := true;
+  elsif pg_catalog.jsonb_typeof(field_config -> 'visibleWhen') = 'object' then
+    conditions := pg_catalog.jsonb_build_array(field_config -> 'visibleWhen');
+  else
+    return true;
+  end if;
+
+  for condition_config in
+    select item
+      from pg_catalog.jsonb_array_elements(conditions) as item
+  loop
+    controller_key := nullif(condition_config ->> 'fieldKey', '');
+    column_key := nullif(condition_config ->> 'columnKey', '');
+
+    if controller_key is null and column_key is null then
+      if is_any then return true; end if;
+      continue;
+    end if;
+
+    if controller_key is not null
+       and not private.monitor_csv_field_is_visible(
+         controller_key,
+         p_values,
+         p_data,
+         p_fields,
+         array_append(coalesce(p_visiting, array[]::text[]), p_field_key)
+       ) then
+      matches := false;
+    else
+      raw_value := case
+        when column_key is not null then coalesce(p_data, '{}'::jsonb) -> column_key
+        else coalesce(p_values, '{}'::jsonb) -> controller_key
+      end;
+      text_value := btrim(
+        case
+          when raw_value is null or raw_value = 'null'::jsonb then ''
+          when pg_catalog.jsonb_typeof(raw_value) = 'string' then raw_value #>> '{}'
+          else raw_value::text
+        end
+      );
+      checked := raw_value = 'true'::jsonb or lower(text_value) = 'true';
+      operator := coalesce(condition_config ->> 'op', 'eq');
+
+      case operator
+        when 'set' then
+          matches := text_value <> '' and raw_value <> 'false'::jsonb;
+        when 'notset' then
+          matches := text_value = '' or raw_value = 'false'::jsonb;
+        when 'eq' then
+          if pg_catalog.jsonb_typeof(condition_config -> 'values') = 'array'
+             and pg_catalog.jsonb_array_length(condition_config -> 'values') > 0 then
+            select exists (
+              select 1
+                from pg_catalog.jsonb_array_elements_text(condition_config -> 'values') as choice(value)
+               where choice.value = text_value
+            ) into matches;
+          else
+            matches := text_value = coalesce(condition_config ->> 'value', '');
+          end if;
+        when 'neq' then
+          if pg_catalog.jsonb_typeof(condition_config -> 'values') = 'array'
+             and pg_catalog.jsonb_array_length(condition_config -> 'values') > 0 then
+            select not exists (
+              select 1
+                from pg_catalog.jsonb_array_elements_text(condition_config -> 'values') as choice(value)
+               where choice.value = text_value
+            ) into matches;
+          else
+            matches := text_value <> coalesce(condition_config ->> 'value', '');
+          end if;
+        when 'true' then matches := checked;
+        when 'false' then matches := not checked;
+        else matches := true;
+      end case;
+    end if;
+
+    if is_any and matches then return true; end if;
+    if not is_any and not matches then return false; end if;
+  end loop;
+
+  return not is_any;
+end;
+$$;
+
+
+ALTER FUNCTION "private"."monitor_csv_field_is_visible"("p_field_key" "text", "p_values" "jsonb", "p_data" "jsonb", "p_fields" "jsonb", "p_visiting" "text"[]) OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "private"."reconcile_concurrence_snapshot_impl"("p_filename" "text", "p_rows" "jsonb") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    SET "statement_timeout" TO '60s'
+    AS $_$
+declare
+  monitor_record public.monitor%rowtype;
+  v_batch_id uuid;
+  v_source_rows integer;
+  v_cavite_episodes integer;
+  v_duplicate_episode_keys integer;
+  v_added_count integer := 0;
+  v_retained_count integer := 0;
+  v_returning_count integer := 0;
+  v_grantee_matched_count integer := 0;
+  v_protected_history_count integer := 0;
+  v_archived_count integer := 0;
+  v_unresolved_count integer := 0;
+  v_visible_after integer := 0;
+  status_field_key text;
+  link_field_key text;
+  yes_value text := 'Yes';
+begin
+  if (select auth.uid()) is null
+     or not (select public.monitor_caller_is_editor()) then
+    raise exception 'Editor access required';
+  end if;
+
+  if nullif(btrim(p_filename), '') is null then
+    raise exception 'A source filename is required';
+  end if;
+  if pg_catalog.jsonb_typeof(p_rows) <> 'array' then
+    raise exception 'Concurrence rows must be a JSON array';
+  end if;
+
+  v_source_rows := pg_catalog.jsonb_array_length(p_rows);
+  if v_source_rows = 0 then
+    raise exception 'The file contains zero Cavite episodes';
+  end if;
+  if v_source_rows > 10000 then
+    raise exception 'The snapshot exceeds the 10,000 row safety limit';
+  end if;
+  if exists (
+    select 1
+      from pg_catalog.jsonb_array_elements(p_rows) as element(payload)
+     where pg_catalog.jsonb_typeof(element.payload) <> 'object'
+        or not (element.payload ?& array[
+          'listahanan_id',
+          'current_address',
+          'old_address',
+          'new_address',
+          'user_name',
+          'date_inserted'
+        ])
+  ) then
+    raise exception 'Every Concurrence row must contain all six expected columns';
+  end if;
+
+  select *
+    into monitor_record
+    from public.monitor
+   where slug = 'for-concurrence'
+   for update;
+  if monitor_record.id is null then
+    raise exception 'The for-concurrence monitor does not exist';
+  end if;
+
+  perform pg_catalog.pg_advisory_xact_lock(
+    pg_catalog.hashtextextended('concurrence:' || monitor_record.id::text, 0)
+  );
+
+  select field ->> 'key',
+         coalesce(
+           (
+             select option_value
+               from pg_catalog.jsonb_array_elements_text(coalesce(field -> 'options', '[]'::jsonb)) option_value
+              where option_value ~* '^(yes|true|concurred)$'
+              limit 1
+           ),
+           'Yes'
+         )
+    into status_field_key, yes_value
+    from pg_catalog.jsonb_array_elements(coalesce(monitor_record.fields, '[]'::jsonb)) field
+   where pg_catalog.regexp_replace(
+     lower(coalesce(field ->> 'label', '')),
+     '[^a-z0-9]+',
+     ' ',
+     'g'
+   ) = 'is concurred'
+   limit 1;
+
+  select field ->> 'key'
+    into link_field_key
+    from pg_catalog.jsonb_array_elements(coalesce(monitor_record.fields, '[]'::jsonb)) field
+   where lower(coalesce(field ->> 'type', '')) = 'link'
+     and lower(coalesce(field ->> 'label', '')) like '%concurrence%'
+   limit 1;
+
+  if status_field_key is null or link_field_key is null then
+    raise exception 'Concurrence status and endorsement-link fields must be configured';
+  end if;
+
+  drop table if exists pg_temp.concurrence_snapshot_stage;
+  create temporary table concurrence_snapshot_stage (
+    concurrence_case_id text primary key,
+    beneficiary_hh_id text not null,
+    episode_at timestamp without time zone not null,
+    date_inserted text not null,
+    current_address text not null,
+    old_address text not null,
+    new_address text not null,
+    source_user text not null,
+    region text not null,
+    province text not null,
+    municipality text not null,
+    barangay text not null,
+    street text not null
+  ) on commit drop;
+  truncate table concurrence_snapshot_stage;
+
+  if exists (
+    select 1
+      from pg_catalog.jsonb_to_recordset(p_rows) as source_row(
+        listahanan_id text,
+        current_address text,
+        old_address text,
+        new_address text,
+        user_name text,
+        date_inserted text
+      )
+     where private.concurrence_normalize_hhid(source_row.listahanan_id) = ''
+        or private.concurrence_parse_timestamp(source_row.date_inserted) is null
+        or upper(btrim(pg_catalog.split_part(coalesce(source_row.new_address, ''), ',', 2))) <> 'CAVITE'
+  ) then
+    raise exception 'The snapshot contains a blank ID, invalid Date Inserted, or non-Cavite destination';
+  end if;
+
+  insert into concurrence_snapshot_stage (
+    concurrence_case_id,
+    beneficiary_hh_id,
+    episode_at,
+    date_inserted,
+    current_address,
+    old_address,
+    new_address,
+    source_user,
+    region,
+    province,
+    municipality,
+    barangay,
+    street
+  )
+  select distinct on (private.concurrence_case_id(source_row.listahanan_id, parsed.episode_at))
+    private.concurrence_case_id(source_row.listahanan_id, parsed.episode_at),
+    private.concurrence_normalize_hhid(source_row.listahanan_id),
+    parsed.episode_at,
+    btrim(source_row.date_inserted),
+    btrim(coalesce(source_row.current_address, '')),
+    btrim(coalesce(source_row.old_address, '')),
+    btrim(coalesce(source_row.new_address, '')),
+    btrim(coalesce(source_row.user_name, '')),
+    btrim(pg_catalog.split_part(source_row.new_address, ',', 1)),
+    btrim(pg_catalog.split_part(source_row.new_address, ',', 2)),
+    btrim(pg_catalog.split_part(source_row.new_address, ',', 3)),
+    btrim(pg_catalog.split_part(source_row.new_address, ',', 4)),
+    btrim(pg_catalog.regexp_replace(source_row.new_address, '^([^,]*,){4}\s*', ''))
+    from pg_catalog.jsonb_to_recordset(p_rows) as source_row(
+      listahanan_id text,
+      current_address text,
+      old_address text,
+      new_address text,
+      user_name text,
+      date_inserted text
+    )
+    cross join lateral (
+      select private.concurrence_parse_timestamp(source_row.date_inserted) as episode_at
+    ) parsed
+   order by private.concurrence_case_id(source_row.listahanan_id, parsed.episode_at);
+
+  get diagnostics v_cavite_episodes = row_count;
+  v_duplicate_episode_keys := v_source_rows - v_cavite_episodes;
+
+  if v_cavite_episodes = 0 then
+    raise exception 'The file contains zero valid Cavite episodes';
+  end if;
+
+  insert into public.concurrence_import_batch (
+    monitor_id,
+    filename,
+    source_rows,
+    cavite_episodes,
+    duplicate_episode_keys,
+    imported_by
+  ) values (
+    monitor_record.id,
+    btrim(p_filename),
+    v_source_rows,
+    v_cavite_episodes,
+    v_duplicate_episode_keys,
+    (select auth.uid())
+  ) returning id into v_batch_id;
+
+  with candidates as (
+    select stage.*,
+           (
+             select count(*)::integer
+               from public.monitor_row existing_episode
+              where existing_episode.monitor_id = monitor_record.id
+                and existing_episode.beneficiary_hh_id = stage.beneficiary_hh_id
+           ) + row_number() over (
+             partition by stage.beneficiary_hh_id
+             order by stage.episode_at, stage.concurrence_case_id
+           )::integer as episode_no
+      from concurrence_snapshot_stage stage
+     where not exists (
+       select 1
+         from public.monitor_row existing_case
+        where existing_case.monitor_id = monitor_record.id
+          and existing_case.row_key = stage.concurrence_case_id
+     )
+  )
+  insert into public.monitor_row (
+    monitor_id,
+    row_key,
+    municipality,
+    beneficiary_hh_id,
+    data,
+    values
+  )
+  select
+    monitor_record.id,
+    candidate.concurrence_case_id,
+    candidate.municipality,
+    candidate.beneficiary_hh_id,
+    pg_catalog.jsonb_build_object(
+      'Listahanan ID', candidate.beneficiary_hh_id,
+      'Current Address', candidate.current_address,
+      'Old Address', candidate.old_address,
+      'New Address', candidate.new_address,
+      'User', candidate.source_user,
+      'Date Inserted', candidate.date_inserted,
+      'Region', candidate.region,
+      'Province', candidate.province,
+      'Municipality', candidate.municipality,
+      'Barangay', candidate.barangay,
+      'Street', candidate.street,
+      '__concurrence_case_id', candidate.concurrence_case_id,
+      '__concurrence_episode_no', candidate.episode_no,
+      '__concurrence_is_returning', candidate.episode_no > 1,
+      '__concurrence_grantee_match', exists (
+        select 1
+          from public.grantee_list matched_grantee
+         where matched_grantee.hh_id = candidate.beneficiary_hh_id
+      ),
+      '__concurrence_episode_at', candidate.date_inserted,
+      '__concurrence_source_filename', btrim(p_filename),
+      '__concurrence_import_batch_id', v_batch_id::text
+    ),
+    case
+      when candidate.episode_no = 1
+           and exists (
+             select 1
+               from public.grantee_list matched_grantee
+              where matched_grantee.hh_id = candidate.beneficiary_hh_id
+           )
+        then pg_catalog.jsonb_build_object(status_field_key, yes_value)
+      else '{}'::jsonb
+    end
+    from candidates candidate
+  on conflict (monitor_id, row_key) do nothing;
+
+  get diagnostics v_added_count = row_count;
+  v_retained_count := v_cavite_episodes - v_added_count;
+
+  select count(*)::integer
+    into v_returning_count
+    from public.monitor_row added_row
+   where added_row.monitor_id = monitor_record.id
+     and added_row.data ->> '__concurrence_import_batch_id' = v_batch_id::text
+     and added_row.data ->> '__concurrence_is_returning' = 'true';
+
+  perform public.sync_monitor_grantee_profiles(monitor_record.id);
+
+  select count(*)::integer
+    into v_protected_history_count
+    from public.monitor_row historical_row
+   where historical_row.monitor_id = monitor_record.id
+     and not exists (
+       select 1
+         from concurrence_snapshot_stage stage
+        where stage.concurrence_case_id = historical_row.row_key
+     )
+     and not exists (
+       select 1
+         from public.grantee_list current_grantee
+        where current_grantee.hh_id = historical_row.beneficiary_hh_id
+     )
+     and (
+       historical_row.values ->> status_field_key = yes_value
+       or nullif(btrim(historical_row.values ->> link_field_key), '') is not null
+       or historical_row.data ->> '__concurrence_archive_protected' = 'true'
+     );
+
+  with archived_rows as (
+    insert into public.concurrence_row_archive (
+      batch_id,
+      monitor_id,
+      original_row_id,
+      concurrence_case_id,
+      beneficiary_hh_id,
+      row_snapshot,
+      archived_by
+    )
+    select
+      v_batch_id,
+      historical_row.monitor_id,
+      historical_row.id,
+      historical_row.row_key,
+      historical_row.beneficiary_hh_id,
+      pg_catalog.to_jsonb(historical_row),
+      (select auth.uid())
+      from public.monitor_row historical_row
+     where historical_row.monitor_id = monitor_record.id
+       and not exists (
+         select 1
+           from concurrence_snapshot_stage stage
+          where stage.concurrence_case_id = historical_row.row_key
+       )
+       and not exists (
+         select 1
+           from public.grantee_list current_grantee
+          where current_grantee.hh_id = historical_row.beneficiary_hh_id
+       )
+       and coalesce(historical_row.values ->> status_field_key, '') <> yes_value
+       and nullif(btrim(historical_row.values ->> link_field_key), '') is null
+       and coalesce(historical_row.data ->> '__concurrence_archive_protected', 'false') <> 'true'
+    returning original_row_id
+  )
+  delete from public.monitor_row active_row
+   using archived_rows
+   where active_row.id = archived_rows.original_row_id;
+  get diagnostics v_archived_count = row_count;
+
+  select count(*)::integer
+    into v_grantee_matched_count
+    from public.monitor_row matched_row
+   where matched_row.monitor_id = monitor_record.id
+     and matched_row.data ->> '__concurrence_grantee_match' = 'true';
+
+  select count(*)::integer
+    into v_unresolved_count
+    from public.monitor_row unresolved_row
+   where unresolved_row.monitor_id = monitor_record.id
+     and (
+       nullif(btrim(unresolved_row.beneficiary_hh_id), '') is null
+       or nullif(btrim(unresolved_row.row_key), '') is null
+     );
+
+  select count(*)::integer
+    into v_visible_after
+    from public.monitor_row visible_row
+   where visible_row.monitor_id = monitor_record.id;
+
+  update public.concurrence_import_batch
+     set added_count = v_added_count,
+         retained_count = v_retained_count,
+         returning_count = v_returning_count,
+         grantee_matched_count = v_grantee_matched_count,
+         protected_history_count = v_protected_history_count,
+         archived_count = v_archived_count,
+         unresolved_count = v_unresolved_count
+   where id = v_batch_id;
+
+  return pg_catalog.jsonb_build_object(
+    'batch_id', v_batch_id,
+    'source_rows', v_source_rows,
+    'cavite_episodes', v_cavite_episodes,
+    'duplicate_episode_keys', v_duplicate_episode_keys,
+    'added', v_added_count,
+    'retained', v_retained_count,
+    'returning', v_returning_count,
+    'matched', v_grantee_matched_count,
+    'protected_history', v_protected_history_count,
+    'archived', v_archived_count,
+    'unresolved', v_unresolved_count,
+    'visible_after', v_visible_after
+  );
+end;
+$_$;
+
+
+ALTER FUNCTION "private"."reconcile_concurrence_snapshot_impl"("p_filename" "text", "p_rows" "jsonb") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "private"."restore_concurrence_row_impl"("p_archive_id" "uuid") RETURNS "uuid"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    SET "statement_timeout" TO '30s'
+    AS $$
+declare
+  archived public.concurrence_row_archive%rowtype;
+  restored_id uuid;
+begin
+  if (select auth.uid()) is null
+     or not (select public.monitor_caller_is_editor()) then
+    raise exception 'Editor access required';
+  end if;
+
+  select *
+    into archived
+    from public.concurrence_row_archive
+   where id = p_archive_id
+     and restored_at is null
+   for update;
+  if archived.id is null then
+    raise exception 'Archived cancellation was not found or is already restored';
+  end if;
+
+  if exists (
+    select 1
+      from public.monitor_row current_row
+     where current_row.monitor_id = archived.monitor_id
+       and current_row.row_key = archived.concurrence_case_id
+  ) then
+    raise exception 'This exact Concurrence episode already exists';
+  end if;
+
+  restored_id := (archived.row_snapshot ->> 'id')::uuid;
+  if exists (select 1 from public.monitor_row current_row where current_row.id = restored_id) then
+    restored_id := gen_random_uuid();
+  end if;
+
+  insert into public.monitor_row (
+    id,
+    monitor_id,
+    row_key,
+    municipality,
+    beneficiary_hh_id,
+    data,
+    values,
+    encoded_by,
+    encoded_at,
+    created_at,
+    updated_at
+  ) values (
+    restored_id,
+    archived.monitor_id,
+    archived.concurrence_case_id,
+    archived.row_snapshot ->> 'municipality',
+    archived.beneficiary_hh_id,
+    pg_catalog.jsonb_set(
+      coalesce(archived.row_snapshot -> 'data', '{}'::jsonb),
+      array['__concurrence_archive_protected'],
+      'true'::jsonb,
+      true
+    ),
+    coalesce(archived.row_snapshot -> 'values', '{}'::jsonb),
+    nullif(archived.row_snapshot ->> 'encoded_by', '')::uuid,
+    nullif(archived.row_snapshot ->> 'encoded_at', '')::timestamptz,
+    coalesce(nullif(archived.row_snapshot ->> 'created_at', '')::timestamptz, now()),
+    coalesce(nullif(archived.row_snapshot ->> 'updated_at', '')::timestamptz, now())
+  );
+
+  update public.concurrence_row_archive
+     set restored_by = (select auth.uid()),
+         restored_at = now()
+   where id = archived.id;
+
+  return restored_id;
+end;
+$$;
+
+
+ALTER FUNCTION "private"."restore_concurrence_row_impl"("p_archive_id" "uuid") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."bulk_update_monitor_rows_from_csv"("p_monitor_id" "uuid", "p_match_mode" "text", "p_ids" "jsonb", "p_field_key" "text", "p_target_value" "jsonb", "p_apply" boolean DEFAULT false) RETURNS "jsonb"
+    LANGUAGE "plpgsql"
+    SET "search_path" TO ''
+    SET "statement_timeout" TO '30s'
+    AS $$
+declare
+  monitor_config public.monitor%rowtype;
+  target_field jsonb;
+  target_type text;
+  target_text text;
+  raw_match_mode text := btrim(coalesce(p_match_mode, ''));
+  normalized_match_mode text;
+  match_column text;
+  person_match boolean := false;
+  source_count bigint := 0;
+  matched_count bigint := 0;
+  changed_count bigint := 0;
+  unchanged_count bigint := 0;
+  conflict_count bigint := 0;
+  unmatched_count bigint := 0;
+  ambiguous_count bigint := 0;
+  shared_household_count bigint := 0;
+  cleared_value_count bigint := 0;
+  current_text text;
+  next_values jsonb;
+  field_config jsonb;
+  before_visible boolean;
+  after_visible boolean;
+  target_row record;
+  unmatched_ids jsonb := '[]'::jsonb;
+  ambiguous_ids jsonb := '[]'::jsonb;
+  shared_households jsonb := '[]'::jsonb;
+begin
+  if (select auth.uid()) is null
+     or not (select public.monitor_caller_is_editor()) then
+    raise exception 'Editor access required';
+  end if;
+
+  select *
+    into monitor_config
+    from public.monitor
+   where id = p_monitor_id
+     and active = true;
+
+  if not found then
+    raise exception 'Monitoring tool not found';
+  end if;
+  if monitor_config.slug = 'for-concurrence' then
+    raise exception 'Transfer of Residence uses its dedicated reconciliation workflow';
+  end if;
+
+  normalized_match_mode := lower(raw_match_mode);
+  if normalized_match_mode = 'person_id' then
+    person_match := true;
+    if not exists (
+      select 1
+        from public.monitor_row
+       where monitor_id = p_monitor_id
+         and person_id is not null
+       limit 1
+    ) then
+      raise exception 'PERSON_ID matching is unavailable for this monitoring tool';
+    end if;
+  elsif normalized_match_mode = 'hhid' then
+    null;
+  elsif left(raw_match_mode, 7) = 'column:' then
+    match_column := substr(raw_match_mode, 8);
+    if btrim(coalesce(match_column, '')) = ''
+       or not exists (
+         select 1
+           from pg_catalog.jsonb_array_elements_text(
+             coalesce(monitor_config.roster_columns, '[]'::jsonb)
+           ) as configured(value)
+          where configured.value = match_column
+       ) then
+      raise exception 'The selected monitoring match column does not exist';
+    end if;
+  else
+    raise exception 'Select an existing monitoring table column to match';
+  end if;
+
+  if pg_catalog.jsonb_typeof(p_ids) <> 'array'
+     or pg_catalog.jsonb_array_length(p_ids) = 0 then
+    raise exception 'The CSV must contain at least one identifier';
+  end if;
+  if exists (
+    select 1
+      from pg_catalog.jsonb_array_elements(p_ids) as source(value)
+     where pg_catalog.jsonb_typeof(source.value) <> 'string'
+        or btrim(source.value #>> '{}') = ''
+  ) then
+    raise exception 'Blank or invalid CSV identifiers are not allowed';
+  end if;
+
+  create temporary table if not exists monitor_csv_source_ids (
+    source_id text primary key
+  ) on commit drop;
+  truncate table pg_temp.monitor_csv_source_ids;
+
+  insert into pg_temp.monitor_csv_source_ids(source_id)
+  select distinct upper(regexp_replace(btrim(source.value), '[[:space:]]+', '', 'g'))
+    from pg_catalog.jsonb_array_elements_text(p_ids) as source(value);
+
+  get diagnostics source_count = row_count;
+  if source_count <> pg_catalog.jsonb_array_length(p_ids) then
+    raise exception 'Duplicate CSV identifiers are not allowed';
+  end if;
+
+  select item
+    into target_field
+    from pg_catalog.jsonb_array_elements(coalesce(monitor_config.fields, '[]'::jsonb)) as item
+   where item ->> 'key' = p_field_key
+   limit 1;
+  if target_field is null then
+    raise exception 'The selected monitoring input field does not exist';
+  end if;
+
+  target_type := target_field ->> 'type';
+  if target_type not in ('dropdown', 'checkbox', 'text', 'textarea', 'link', 'date', 'number', 'qr') then
+    raise exception 'The selected monitoring input field type is not supported';
+  end if;
+  if target_type = 'checkbox' then
+    if pg_catalog.jsonb_typeof(p_target_value) <> 'boolean' then
+      raise exception 'Checkbox updates require a true or false value';
+    end if;
+  else
+    if pg_catalog.jsonb_typeof(p_target_value) not in ('string', 'number') then
+      raise exception 'The fixed value must be text or a number';
+    end if;
+    target_text := btrim(p_target_value #>> '{}');
+    if target_text = '' then
+      raise exception 'The fixed value cannot be blank';
+    end if;
+    if target_type = 'dropdown'
+       and not exists (
+         select 1
+           from pg_catalog.jsonb_array_elements_text(
+             coalesce(target_field -> 'options', '[]'::jsonb)
+           ) as option(value)
+          where option.value = target_text
+       ) then
+      raise exception 'The fixed value is not an option for the selected dropdown';
+    end if;
+    if target_type = 'number' then
+      begin
+        perform target_text::numeric;
+      exception when invalid_text_representation then
+        raise exception 'The fixed value must be a number';
+      end;
+      if target_field ? 'min' and target_text::numeric < (target_field ->> 'min')::numeric then
+        raise exception 'The fixed value is below the field minimum';
+      end if;
+      if target_field ? 'max' and target_text::numeric > (target_field ->> 'max')::numeric then
+        raise exception 'The fixed value is above the field maximum';
+      end if;
+    end if;
+  end if;
+
+  perform pg_catalog.pg_advisory_xact_lock(
+    pg_catalog.hashtextextended('monitor_csv_update:' || p_monitor_id::text, 0)
+  );
+
+  create temporary table if not exists monitor_csv_matches (
+    source_id text not null,
+    row_id uuid not null,
+    primary key (source_id, row_id)
+  ) on commit drop;
+  truncate table pg_temp.monitor_csv_matches;
+
+  if person_match then
+    insert into pg_temp.monitor_csv_matches(source_id, row_id)
+    select source.source_id, mr.id
+      from pg_temp.monitor_csv_source_ids as source
+      join public.monitor_row as mr
+        on mr.monitor_id = p_monitor_id
+       and mr.person_id = source.source_id;
+  elsif normalized_match_mode = 'hhid' then
+    insert into pg_temp.monitor_csv_matches(source_id, row_id)
+    select source.source_id, mr.id
+      from pg_temp.monitor_csv_source_ids as source
+      join public.monitor_row as mr
+        on mr.monitor_id = p_monitor_id
+       and mr.beneficiary_hh_id = source.source_id;
+  else
+    insert into pg_temp.monitor_csv_matches(source_id, row_id)
+    select source.source_id, mr.id
+      from public.monitor_row as mr
+      join pg_temp.monitor_csv_source_ids as source
+        on source.source_id = upper(
+          regexp_replace(btrim(coalesce(mr.data ->> match_column, '')), '[[:space:]]+', '', 'g')
+        )
+     where mr.monitor_id = p_monitor_id;
+  end if;
+
+  select count(*)
+    into unmatched_count
+    from pg_temp.monitor_csv_source_ids as source
+   where not exists (
+     select 1
+       from pg_temp.monitor_csv_matches as matched
+      where matched.source_id = source.source_id
+   );
+
+  select coalesce(pg_catalog.jsonb_agg(sample.source_id order by sample.source_id), '[]'::jsonb)
+    into unmatched_ids
+    from (
+      select source.source_id
+        from pg_temp.monitor_csv_source_ids as source
+       where not exists (
+         select 1
+           from pg_temp.monitor_csv_matches as matched
+          where matched.source_id = source.source_id
+       )
+       order by source.source_id
+       limit 100
+    ) as sample;
+
+  if not person_match then
+    select count(*)
+      into ambiguous_count
+      from (
+        select source_id
+          from pg_temp.monitor_csv_matches
+         group by source_id
+        having count(*) > 1
+      ) as ambiguous;
+
+    select coalesce(
+      pg_catalog.jsonb_agg(
+        pg_catalog.jsonb_build_object('id', sample.source_id, 'rows', sample.row_count)
+        order by sample.source_id
+      ),
+      '[]'::jsonb
+    )
+      into ambiguous_ids
+      from (
+        select source_id, count(*) as row_count
+          from pg_temp.monitor_csv_matches
+         group by source_id
+        having count(*) > 1
+         order by source_id
+         limit 100
+      ) as sample;
+  end if;
+
+  select count(*)
+    into matched_count
+    from pg_temp.monitor_csv_matches as matched
+   where person_match
+      or not exists (
+        select 1
+          from pg_temp.monitor_csv_matches as duplicate_match
+         where duplicate_match.source_id = matched.source_id
+         group by duplicate_match.source_id
+        having count(*) > 1
+      );
+
+  if person_match then
+    select count(*)
+      into shared_household_count
+      from (
+        select mr.beneficiary_hh_id
+          from pg_temp.monitor_csv_matches as matched
+          join public.monitor_row as mr on mr.id = matched.row_id
+         where mr.beneficiary_hh_id is not null
+         group by mr.beneficiary_hh_id
+        having count(*) > 1
+      ) as shared;
+
+    select coalesce(
+      pg_catalog.jsonb_agg(
+        pg_catalog.jsonb_build_object('hhid', sample.hhid, 'rows', sample.row_count)
+        order by sample.hhid
+      ),
+      '[]'::jsonb
+    )
+      into shared_households
+      from (
+        select mr.beneficiary_hh_id as hhid, count(*) as row_count
+          from pg_temp.monitor_csv_matches as matched
+          join public.monitor_row as mr on mr.id = matched.row_id
+         where mr.beneficiary_hh_id is not null
+         group by mr.beneficiary_hh_id
+        having count(*) > 1
+         order by mr.beneficiary_hh_id
+         limit 100
+      ) as sample;
+  end if;
+
+  for target_row in
+    select mr.id, mr.data, mr.values
+      from pg_temp.monitor_csv_matches as matched
+      join public.monitor_row as mr on mr.id = matched.row_id
+     where person_match
+        or not exists (
+          select 1
+            from pg_temp.monitor_csv_matches as duplicate_match
+           where duplicate_match.source_id = matched.source_id
+           group by duplicate_match.source_id
+          having count(*) > 1
+        )
+     order by mr.id
+  loop
+    current_text := btrim(coalesce(target_row.values ->> p_field_key, ''));
+    next_values := pg_catalog.jsonb_set(
+      coalesce(target_row.values, '{}'::jsonb),
+      array[p_field_key],
+      p_target_value,
+      true
+    );
+
+    if coalesce(target_row.values, '{}'::jsonb) -> p_field_key = p_target_value then
+      unchanged_count := unchanged_count + 1;
+      continue;
+    end if;
+    if current_text <> '' then
+      conflict_count := conflict_count + 1;
+    end if;
+
+    for field_config in
+      select item
+        from pg_catalog.jsonb_array_elements(coalesce(monitor_config.fields, '[]'::jsonb)) as item
+       where item ->> 'key' <> p_field_key
+    loop
+      before_visible := private.monitor_csv_field_is_visible(
+        field_config ->> 'key',
+        coalesce(target_row.values, '{}'::jsonb),
+        coalesce(target_row.data, '{}'::jsonb),
+        coalesce(monitor_config.fields, '[]'::jsonb)
+      );
+      after_visible := private.monitor_csv_field_is_visible(
+        field_config ->> 'key',
+        next_values,
+        coalesce(target_row.data, '{}'::jsonb),
+        coalesce(monitor_config.fields, '[]'::jsonb)
+      );
+      if before_visible and not after_visible and next_values ? (field_config ->> 'key') then
+        next_values := next_values - (field_config ->> 'key');
+        cleared_value_count := cleared_value_count + 1;
+      end if;
+    end loop;
+
+    changed_count := changed_count + 1;
+    if p_apply then
+      update public.monitor_row
+         set values = next_values,
+             encoded_by = (select auth.uid()),
+             encoded_at = pg_catalog.clock_timestamp()
+       where id = target_row.id;
+    end if;
+  end loop;
+
+  return pg_catalog.jsonb_build_object(
+    'applied', p_apply,
+    'source_ids', source_count,
+    'matched', matched_count,
+    'changed', changed_count,
+    'unchanged', unchanged_count,
+    'conflicts', conflict_count,
+    'unmatched', unmatched_count,
+    'ambiguous', ambiguous_count,
+    'shared_households', shared_household_count,
+    'cleared_values', cleared_value_count,
+    'unmatched_ids', unmatched_ids,
+    'ambiguous_ids', ambiguous_ids,
+    'shared_household_samples', shared_households
+  );
+end;
+$$;
+
+
+ALTER FUNCTION "public"."bulk_update_monitor_rows_from_csv"("p_monitor_id" "uuid", "p_match_mode" "text", "p_ids" "jsonb", "p_field_key" "text", "p_target_value" "jsonb", "p_apply" boolean) OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."bulk_update_monitor_rows_from_csv"("p_monitor_id" "uuid", "p_match_mode" "text", "p_ids" "jsonb", "p_field_key" "text", "p_target_value" "jsonb", "p_apply" boolean) IS 'Editor-only transactional preview/apply of a fixed monitoring field value matched by a configured monitoring table column; excludes Transfer of Residence.';
+
+
+
+CREATE OR REPLACE FUNCTION "public"."bulk_update_monitor_rows_from_csv_v2"("p_monitor_id" "uuid", "p_match_mode" "text", "p_ids" "jsonb", "p_field_key" "text", "p_target_value" "jsonb", "p_overwrite_existing" boolean DEFAULT true, "p_apply" boolean DEFAULT false) RETURNS "jsonb"
+    LANGUAGE "plpgsql"
+    SET "search_path" TO ''
+    SET "statement_timeout" TO '30s'
+    AS $$
+declare
+  monitor_config public.monitor%rowtype;
+  raw_match_mode text := btrim(coalesce(p_match_mode, ''));
+  normalized_match_mode text;
+  match_column text;
+  person_match boolean := false;
+  full_result jsonb;
+  safe_result jsonb;
+  safe_ids jsonb := '[]'::jsonb;
+begin
+  -- The core preview performs editor authorization plus all monitor, field,
+  -- value, identifier, and Transfer of Residence validation before this
+  -- wrapper derives its non-overwriting subset.
+  full_result := public.bulk_update_monitor_rows_from_csv(
+    p_monitor_id,
+    p_match_mode,
+    p_ids,
+    p_field_key,
+    p_target_value,
+    false
+  );
+
+  if p_overwrite_existing then
+    if p_apply then
+      full_result := public.bulk_update_monitor_rows_from_csv(
+        p_monitor_id,
+        p_match_mode,
+        p_ids,
+        p_field_key,
+        p_target_value,
+        true
+      );
+    end if;
+    return full_result || pg_catalog.jsonb_build_object(
+      'overwrite_existing', true,
+      'skipped_existing', 0
+    );
+  end if;
+
+  select *
+    into monitor_config
+    from public.monitor
+   where id = p_monitor_id
+     and active = true;
+
+  normalized_match_mode := lower(raw_match_mode);
+  if normalized_match_mode = 'person_id' then
+    person_match := true;
+  elsif normalized_match_mode = 'hhid' then
+    null;
+  elsif left(raw_match_mode, 7) = 'column:' then
+    match_column := substr(raw_match_mode, 8);
+  end if;
+
+  create temporary table if not exists monitor_csv_keep_source_ids (
+    source_id text primary key
+  ) on commit drop;
+  truncate table pg_temp.monitor_csv_keep_source_ids;
+
+  insert into pg_temp.monitor_csv_keep_source_ids(source_id)
+  select distinct upper(regexp_replace(btrim(source.value), '[[:space:]]+', '', 'g'))
+    from pg_catalog.jsonb_array_elements_text(p_ids) as source(value);
+
+  create temporary table if not exists monitor_csv_keep_matches (
+    source_id text not null,
+    row_id uuid not null,
+    primary key (source_id, row_id)
+  ) on commit drop;
+  truncate table pg_temp.monitor_csv_keep_matches;
+
+  if person_match then
+    insert into pg_temp.monitor_csv_keep_matches(source_id, row_id)
+    select source.source_id, monitoring_row.id
+      from pg_temp.monitor_csv_keep_source_ids source
+      join public.monitor_row monitoring_row
+        on monitoring_row.monitor_id = p_monitor_id
+       and monitoring_row.person_id = source.source_id;
+  elsif normalized_match_mode = 'hhid' then
+    insert into pg_temp.monitor_csv_keep_matches(source_id, row_id)
+    select source.source_id, monitoring_row.id
+      from pg_temp.monitor_csv_keep_source_ids source
+      join public.monitor_row monitoring_row
+        on monitoring_row.monitor_id = p_monitor_id
+       and monitoring_row.beneficiary_hh_id = source.source_id;
+  else
+    insert into pg_temp.monitor_csv_keep_matches(source_id, row_id)
+    select source.source_id, monitoring_row.id
+      from public.monitor_row monitoring_row
+      join pg_temp.monitor_csv_keep_source_ids source
+        on source.source_id = upper(
+          regexp_replace(
+            btrim(coalesce(monitoring_row.data ->> match_column, '')),
+            '[[:space:]]+',
+            '',
+            'g'
+          )
+        )
+     where monitoring_row.monitor_id = p_monitor_id;
+  end if;
+
+  create temporary table if not exists monitor_csv_keep_conflicts (
+    source_id text primary key
+  ) on commit drop;
+  truncate table pg_temp.monitor_csv_keep_conflicts;
+
+  insert into pg_temp.monitor_csv_keep_conflicts(source_id)
+  select distinct matched.source_id
+    from pg_temp.monitor_csv_keep_matches matched
+    join public.monitor_row monitoring_row on monitoring_row.id = matched.row_id
+   where (
+       person_match
+       or not exists (
+         select 1
+           from pg_temp.monitor_csv_keep_matches duplicate_match
+          where duplicate_match.source_id = matched.source_id
+          group by duplicate_match.source_id
+         having count(*) > 1
+       )
+     )
+     and btrim(coalesce(monitoring_row.values ->> p_field_key, '')) <> ''
+     and monitoring_row.values -> p_field_key is distinct from p_target_value;
+
+  select coalesce(pg_catalog.jsonb_agg(source.source_id order by source.source_id), '[]'::jsonb)
+    into safe_ids
+    from pg_temp.monitor_csv_keep_source_ids source
+   where not exists (
+     select 1
+       from pg_temp.monitor_csv_keep_conflicts conflict
+      where conflict.source_id = source.source_id
+   );
+
+  if pg_catalog.jsonb_array_length(safe_ids) > 0 then
+    safe_result := public.bulk_update_monitor_rows_from_csv(
+      p_monitor_id,
+      p_match_mode,
+      safe_ids,
+      p_field_key,
+      p_target_value,
+      p_apply
+    );
+  else
+    safe_result := pg_catalog.jsonb_build_object(
+      'changed', 0,
+      'unchanged', 0,
+      'cleared_values', 0
+    );
+  end if;
+
+  return full_result || pg_catalog.jsonb_build_object(
+    'applied', p_apply,
+    'overwrite_existing', false,
+    'skipped_existing', coalesce((full_result ->> 'conflicts')::bigint, 0),
+    'changed', coalesce((safe_result ->> 'changed')::bigint, 0),
+    'unchanged', coalesce((safe_result ->> 'unchanged')::bigint, 0),
+    'cleared_values', coalesce((safe_result ->> 'cleared_values')::bigint, 0)
+  );
+end;
+$$;
+
+
+ALTER FUNCTION "public"."bulk_update_monitor_rows_from_csv_v2"("p_monitor_id" "uuid", "p_match_mode" "text", "p_ids" "jsonb", "p_field_key" "text", "p_target_value" "jsonb", "p_overwrite_existing" boolean, "p_apply" boolean) OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."bulk_update_monitor_rows_from_csv_v2"("p_monitor_id" "uuid", "p_match_mode" "text", "p_ids" "jsonb", "p_field_key" "text", "p_target_value" "jsonb", "p_overwrite_existing" boolean, "p_apply" boolean) IS 'Editor-only monitoring CSV preview/apply with an option to keep nonblank existing values.';
+
 
 
 CREATE OR REPLACE FUNCTION "public"."case_list_municipality"("p_hh_id" "text", "p_muni" "text") RETURNS "text"
@@ -782,6 +1987,102 @@ $$;
 
 
 ALTER FUNCTION "public"."ipcr_assign_filtered_households"("p_period_id" "uuid", "p_municipality" "text", "p_barangays" "text"[], "p_set_groups" "text"[], "p_query" "text", "p_assignment" "text", "p_user_id" "uuid", "p_monitoring" "text", "p_client_status" "text", "p_excluded_hhids" "text"[], "p_cm_id" "uuid", "p_actor_id" "uuid", "p_as_proposal" boolean, "p_reason" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."ipcr_assignment_summary"("p_period_id" "uuid", "p_municipalities" "text"[] DEFAULT NULL::"text"[]) RETURNS TABLE("total_households" bigint, "assigned_households" bigint, "unassigned_households" bigint, "awaiting_review" bigint, "needs_review" bigint)
+    LANGUAGE "sql" STABLE SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+  with period_settings as materialized (
+    select period.eligible_client_statuses, period.conflict_count
+    from public.ipcr_period period
+    where period.id = p_period_id
+  ), eligible_households as materialized (
+    select distinct g.hh_id, g.municipality
+    from public.grantee_list g
+    cross join period_settings settings
+    where (
+        p_municipalities is null
+        or g.municipality = any(p_municipalities)
+      )
+      and (
+        cardinality(settings.eligible_client_statuses) = 0
+        or g.status = any(settings.eligible_client_statuses)
+      )
+  ), assignment_candidates as materialized (
+    select r.scope_value as hh_id, 2 as priority
+    from public.ipcr_assignment_rule r
+    where r.period_id = p_period_id
+      and r.scope_type = 'hhid'
+      and r.barangay_key = ''
+      and r.status in ('draft', 'published')
+    union all
+    select a.hh_id, 1 as priority
+    from public.ipcr_household_assignment a
+    where a.period_id = p_period_id
+      and a.effective_to is null
+  ), effective_assignments as materialized (
+    select distinct on (candidate.hh_id) candidate.hh_id
+    from assignment_candidates candidate
+    order by candidate.hh_id, candidate.priority desc
+  ), household_totals as materialized (
+    select
+      count(*)::bigint as total_count,
+      count(assignment.hh_id)::bigint as assigned_count
+    from eligible_households household
+    left join effective_assignments assignment on assignment.hh_id = household.hh_id
+  )
+  select
+    totals.total_count,
+    totals.assigned_count,
+    greatest(totals.total_count - totals.assigned_count, 0::bigint),
+    (
+      select count(*)::bigint
+      from public.ipcr_assignment_proposal proposal
+      where proposal.period_id = p_period_id
+        and proposal.status = 'pending'
+        and (
+          p_municipalities is null
+          or proposal.municipality = any(p_municipalities)
+        )
+    ) + (
+      select count(*)::bigint
+      from public.ipcr_supervision supervision
+      where supervision.period_id = p_period_id
+        and supervision.status = 'pending'
+        and (
+          p_municipalities is null
+          or supervision.municipality = any(p_municipalities)
+        )
+    ),
+    (
+      select count(*)::bigint
+      from public.ipcr_assignment_alert alert
+      where alert.period_id = p_period_id
+        and alert.status = 'pending'
+        and (
+          p_municipalities is null
+          or exists (
+            select 1
+            from public.grantee_list g
+            where g.hh_id = alert.hh_id
+              and g.municipality = any(p_municipalities)
+          )
+        )
+    ) + case
+      when p_municipalities is null then settings.conflict_count::bigint
+      else 0::bigint
+    end
+  from household_totals totals
+  cross join period_settings settings;
+$$;
+
+
+ALTER FUNCTION "public"."ipcr_assignment_summary"("p_period_id" "uuid", "p_municipalities" "text"[]) OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."ipcr_assignment_summary"("p_period_id" "uuid", "p_municipalities" "text"[]) IS 'Returns Caseload Inventory assignment KPI totals for an optional municipality scope.';
+
 
 
 CREATE OR REPLACE FUNCTION "public"."ipcr_client_status_options"() RETURNS TABLE("client_status" "text", "household_count" bigint)
@@ -1642,7 +2943,10 @@ CREATE OR REPLACE FUNCTION "public"."ipcr_search_households"("p_period_id" "uuid
   cross join period_settings settings
   left join effective_assignments assignment on assignment.hh_id = g.hh_id
   left join monitor_counts monitors on monitors.hh_id = g.hh_id
-  where (p_municipality is null or g.municipality = p_municipality)
+  where (
+      p_municipality is null
+      or g.municipality = any(string_to_array(p_municipality, chr(31)))
+    )
     and (
       p_barangay is null
       or g.barangay = any(string_to_array(p_barangay, chr(31)))
@@ -1694,7 +2998,7 @@ $$;
 ALTER FUNCTION "public"."ipcr_search_households"("p_period_id" "uuid", "p_municipality" "text", "p_barangay" "text", "p_set_group" "text", "p_query" "text", "p_assignment" "text", "p_user_id" "uuid", "p_monitoring" "text", "p_client_status" "text", "p_limit" integer, "p_offset" integer) OWNER TO "postgres";
 
 
-COMMENT ON FUNCTION "public"."ipcr_search_households"("p_period_id" "uuid", "p_municipality" "text", "p_barangay" "text", "p_set_group" "text", "p_query" "text", "p_assignment" "text", "p_user_id" "uuid", "p_monitoring" "text", "p_client_status" "text", "p_limit" integer, "p_offset" integer) IS 'Searches Caseload Inventory households with period eligibility, Client Status, ownership, and monitoring filters.';
+COMMENT ON FUNCTION "public"."ipcr_search_households"("p_period_id" "uuid", "p_municipality" "text", "p_barangay" "text", "p_set_group" "text", "p_query" "text", "p_assignment" "text", "p_user_id" "uuid", "p_monitoring" "text", "p_client_status" "text", "p_limit" integer, "p_offset" integer) IS 'Searches Caseload Inventory households by one or more municipalities with period eligibility, Client Status, ownership, and monitoring filters.';
 
 
 
@@ -1777,6 +3081,215 @@ $$;
 ALTER FUNCTION "public"."monitor_caller_is_editor"() OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."monitor_case_manager_options"("p_monitor_id" "uuid", "p_municipalities" "text"[] DEFAULT NULL::"text"[]) RETURNS TABLE("user_id" "uuid", "full_name" "text", "target_count" bigint)
+    LANGUAGE "sql" STABLE SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+  select
+    monitoring_row.assigned_case_manager_user_id as user_id,
+    coalesce(nullif(btrim(staff_member.full_name), ''), 'Unnamed Case Manager') as full_name,
+    count(*)::bigint as target_count
+  from public.monitor_row_with_assignment monitoring_row
+  join public.staff staff_member
+    on staff_member.user_id = monitoring_row.assigned_case_manager_user_id
+  where monitoring_row.monitor_id = p_monitor_id
+    and monitoring_row.assigned_case_manager_user_id is not null
+    and staff_member.role = 'case_manager'
+    and staff_member.is_active = true
+    and (
+      p_municipalities is null
+      or monitoring_row.municipality = any(p_municipalities)
+    )
+  group by
+    monitoring_row.assigned_case_manager_user_id,
+    staff_member.full_name
+  order by
+    coalesce(nullif(btrim(staff_member.full_name), ''), 'Unnamed Case Manager'),
+    monitoring_row.assigned_case_manager_user_id;
+$$;
+
+
+ALTER FUNCTION "public"."monitor_case_manager_options"("p_monitor_id" "uuid", "p_municipalities" "text"[]) OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."monitor_case_manager_options"("p_monitor_id" "uuid", "p_municipalities" "text"[]) IS 'Returns active Case Managers who own at least one target in a monitoring tool and optional municipality scope.';
+
+
+
+CREATE OR REPLACE FUNCTION "public"."monitor_csv_replacement_preview"("p_monitor_id" "uuid", "p_match_mode" "text", "p_ids" "jsonb", "p_field_key" "text", "p_target_value" "jsonb") RETURNS "jsonb"
+    LANGUAGE "plpgsql"
+    SET "search_path" TO ''
+    SET "statement_timeout" TO '20s'
+    AS $$
+declare
+  monitor_config public.monitor%rowtype;
+  raw_match_mode text := btrim(coalesce(p_match_mode, ''));
+  normalized_match_mode text;
+  match_column text;
+  person_match boolean := false;
+  replacement_items jsonb := '[]'::jsonb;
+begin
+  if (select auth.uid()) is null
+     or not (select public.monitor_caller_is_editor()) then
+    raise exception 'Editor access required';
+  end if;
+
+  select *
+    into monitor_config
+    from public.monitor
+   where id = p_monitor_id
+     and active = true;
+
+  if not found then
+    raise exception 'Monitoring tool not found';
+  end if;
+  if monitor_config.slug = 'for-concurrence' then
+    raise exception 'Transfer of Residence uses its dedicated reconciliation workflow';
+  end if;
+  if not exists (
+    select 1
+      from pg_catalog.jsonb_array_elements(coalesce(monitor_config.fields, '[]'::jsonb)) as field_config
+     where field_config ->> 'key' = p_field_key
+  ) then
+    raise exception 'The selected monitoring input field does not exist';
+  end if;
+
+  normalized_match_mode := lower(raw_match_mode);
+  if normalized_match_mode = 'person_id' then
+    person_match := true;
+  elsif normalized_match_mode = 'hhid' then
+    null;
+  elsif left(raw_match_mode, 7) = 'column:' then
+    match_column := substr(raw_match_mode, 8);
+    if btrim(coalesce(match_column, '')) = ''
+       or not exists (
+         select 1
+           from pg_catalog.jsonb_array_elements_text(
+             coalesce(monitor_config.roster_columns, '[]'::jsonb)
+           ) as configured(value)
+          where configured.value = match_column
+       ) then
+      raise exception 'The selected monitoring match column does not exist';
+    end if;
+  else
+    raise exception 'Select an existing monitoring table column to match';
+  end if;
+
+  if pg_catalog.jsonb_typeof(p_ids) <> 'array'
+     or pg_catalog.jsonb_array_length(p_ids) = 0 then
+    raise exception 'The CSV must contain at least one identifier';
+  end if;
+  if exists (
+    select 1
+      from pg_catalog.jsonb_array_elements(p_ids) as source(value)
+     where pg_catalog.jsonb_typeof(source.value) <> 'string'
+        or btrim(source.value #>> '{}') = ''
+  ) then
+    raise exception 'Blank or invalid CSV identifiers are not allowed';
+  end if;
+
+  create temporary table if not exists monitor_csv_replacement_source_ids (
+    source_id text primary key
+  ) on commit drop;
+  truncate table pg_temp.monitor_csv_replacement_source_ids;
+
+  insert into pg_temp.monitor_csv_replacement_source_ids(source_id)
+  select distinct upper(regexp_replace(btrim(source.value), '[[:space:]]+', '', 'g'))
+    from pg_catalog.jsonb_array_elements_text(p_ids) as source(value);
+
+  if (select count(*) from pg_temp.monitor_csv_replacement_source_ids)
+     <> pg_catalog.jsonb_array_length(p_ids) then
+    raise exception 'Duplicate CSV identifiers are not allowed';
+  end if;
+
+  create temporary table if not exists monitor_csv_replacement_matches (
+    source_id text not null,
+    row_id uuid not null,
+    primary key (source_id, row_id)
+  ) on commit drop;
+  truncate table pg_temp.monitor_csv_replacement_matches;
+
+  if person_match then
+    insert into pg_temp.monitor_csv_replacement_matches(source_id, row_id)
+    select source.source_id, monitoring_row.id
+      from pg_temp.monitor_csv_replacement_source_ids source
+      join public.monitor_row monitoring_row
+        on monitoring_row.monitor_id = p_monitor_id
+       and monitoring_row.person_id = source.source_id;
+  elsif normalized_match_mode = 'hhid' then
+    insert into pg_temp.monitor_csv_replacement_matches(source_id, row_id)
+    select source.source_id, monitoring_row.id
+      from pg_temp.monitor_csv_replacement_source_ids source
+      join public.monitor_row monitoring_row
+        on monitoring_row.monitor_id = p_monitor_id
+       and monitoring_row.beneficiary_hh_id = source.source_id;
+  else
+    insert into pg_temp.monitor_csv_replacement_matches(source_id, row_id)
+    select source.source_id, monitoring_row.id
+      from public.monitor_row monitoring_row
+      join pg_temp.monitor_csv_replacement_source_ids source
+        on source.source_id = upper(
+          regexp_replace(
+            btrim(coalesce(monitoring_row.data ->> match_column, '')),
+            '[[:space:]]+',
+            '',
+            'g'
+          )
+        )
+     where monitoring_row.monitor_id = p_monitor_id;
+  end if;
+
+  select coalesce(
+    pg_catalog.jsonb_agg(
+      pg_catalog.jsonb_build_object(
+        'id', sample.source_id,
+        'row_key', sample.row_key,
+        'from', sample.current_value,
+        'to', p_target_value
+      )
+      order by sample.source_id, sample.row_key
+    ),
+    '[]'::jsonb
+  )
+    into replacement_items
+    from (
+      select
+        matched.source_id,
+        monitoring_row.row_key,
+        monitoring_row.values -> p_field_key as current_value
+      from pg_temp.monitor_csv_replacement_matches matched
+      join public.monitor_row monitoring_row on monitoring_row.id = matched.row_id
+      where (
+          person_match
+          or not exists (
+            select 1
+              from pg_temp.monitor_csv_replacement_matches duplicate_match
+             where duplicate_match.source_id = matched.source_id
+             group by duplicate_match.source_id
+            having count(*) > 1
+          )
+        )
+        and btrim(coalesce(monitoring_row.values ->> p_field_key, '')) <> ''
+        and monitoring_row.values -> p_field_key is distinct from p_target_value
+      order by matched.source_id, monitoring_row.row_key
+      limit 100
+    ) sample;
+
+  return pg_catalog.jsonb_build_object(
+    'items', replacement_items,
+    'sample_limit', 100
+  );
+end;
+$$;
+
+
+ALTER FUNCTION "public"."monitor_csv_replacement_preview"("p_monitor_id" "uuid", "p_match_mode" "text", "p_ids" "jsonb", "p_field_key" "text", "p_target_value" "jsonb") OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."monitor_csv_replacement_preview"("p_monitor_id" "uuid", "p_match_mode" "text", "p_ids" "jsonb", "p_field_key" "text", "p_target_value" "jsonb") IS 'Returns up to 100 existing monitoring values that an editor CSV update preview would replace.';
+
+
+
 CREATE OR REPLACE FUNCTION "public"."next_transfer_referral_id"() RETURNS "text"
     LANGUAGE "sql"
     AS $$
@@ -1785,6 +3298,21 @@ $$;
 
 
 ALTER FUNCTION "public"."next_transfer_referral_id"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."reconcile_concurrence_snapshot"("filename" "text", "rows" "jsonb") RETURNS "jsonb"
+    LANGUAGE "sql"
+    SET "search_path" TO ''
+    AS $$
+  select private.reconcile_concurrence_snapshot_impl(filename, rows);
+$$;
+
+
+ALTER FUNCTION "public"."reconcile_concurrence_snapshot"("filename" "text", "rows" "jsonb") OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."reconcile_concurrence_snapshot"("filename" "text", "rows" "jsonb") IS 'Editor-only atomic Concurrence episode import, Grantee match, and cancellation archive reconciliation.';
+
 
 
 CREATE OR REPLACE FUNCTION "public"."refresh_grantee_lhf"() RETURNS "void"
@@ -1808,6 +3336,21 @@ $$;
 
 
 ALTER FUNCTION "public"."refresh_grantee_lhf"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."restore_concurrence_row"("archive_id" "uuid") RETURNS "uuid"
+    LANGUAGE "sql"
+    SET "search_path" TO ''
+    AS $$
+  select private.restore_concurrence_row_impl(archive_id);
+$$;
+
+
+ALTER FUNCTION "public"."restore_concurrence_row"("archive_id" "uuid") OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."restore_concurrence_row"("archive_id" "uuid") IS 'Editor-only restoration of one archived Concurrence episode when its exact case ID is absent.';
+
 
 
 CREATE OR REPLACE FUNCTION "public"."set_system_resend_config"("p_api_key" "text", "p_from_addr" "text", "p_reply_to" "text", "p_enabled" boolean, "p_updated_by" "uuid") RETURNS "void"
@@ -2018,48 +3561,100 @@ ALTER FUNCTION "public"."swdi_gap_counts"("p_munis" "text"[]) OWNER TO "postgres
 
 CREATE OR REPLACE FUNCTION "public"."sync_changed_grantees_to_monitors"() RETURNS "trigger"
     LANGUAGE "plpgsql" SECURITY DEFINER
-    SET "search_path" TO 'public'
-    SET "statement_timeout" TO '30s'
-    AS $$
+    SET "search_path" TO ''
+    SET "statement_timeout" TO '45s'
+    AS $_$
 begin
   update public.monitor_row mr
      set municipality = g.municipality,
          data = mr.data
            || case when m.municipality_key is not null
-                   then jsonb_build_object(m.municipality_key, coalesce(g.municipality, ''))
+                   then pg_catalog.jsonb_build_object(m.municipality_key, coalesce(g.municipality, ''))
                    else '{}'::jsonb end
            || case when m.barangay_key is not null
-                   then jsonb_build_object(m.barangay_key, coalesce(g.barangay, ''))
+                   then pg_catalog.jsonb_build_object(m.barangay_key, coalesce(g.barangay, ''))
                    else '{}'::jsonb end
            || case when m.client_status_key is not null
-                   then jsonb_build_object(m.client_status_key, coalesce(g.status, ''))
+                         and m.client_status_key <> mapping.beneficiary_key
+                   then pg_catalog.jsonb_build_object(m.client_status_key, coalesce(g.status, ''))
                    else '{}'::jsonb end
-    from public.monitor m, changed_grantees g
+           || case when m.slug = 'for-concurrence'
+                   then pg_catalog.jsonb_build_object('__concurrence_grantee_match', true)
+                   else '{}'::jsonb end,
+         values = case
+           when m.slug = 'for-concurrence'
+                and concurrence.field_key is not null
+                and coalesce(mr.data ->> '__concurrence_is_returning', 'false') <> 'true'
+             then pg_catalog.jsonb_set(
+               coalesce(mr.values, '{}'::jsonb),
+               array[concurrence.field_key],
+               pg_catalog.to_jsonb(concurrence.yes_value),
+               true
+             )
+           else mr.values
+         end
+    from public.monitor m
+    cross join lateral (
+      select coalesce(
+        m.beneficiary_key,
+        case when m.slug = 'for-concurrence' then 'Listahanan ID' end
+      ) as beneficiary_key
+    ) mapping
+    left join lateral (
+      select
+        field ->> 'key' as field_key,
+        coalesce(
+          (
+            select option_value
+              from pg_catalog.jsonb_array_elements_text(coalesce(field -> 'options', '[]'::jsonb)) option_value
+             where option_value ~* '^(yes|true|concurred)$'
+             limit 1
+          ),
+          'Yes'
+        ) as yes_value
+        from pg_catalog.jsonb_array_elements(coalesce(m.fields, '[]'::jsonb)) field
+       where pg_catalog.regexp_replace(
+         lower(coalesce(field ->> 'label', '')),
+         '[^a-z0-9]+',
+         ' ',
+         'g'
+       ) = 'is concurred'
+       limit 1
+    ) concurrence on true,
+    changed_grantees g
    where mr.monitor_id = m.id
+     and mapping.beneficiary_key is not null
      and g.hh_id = mr.beneficiary_hh_id
-     and m.beneficiary_key is not null
      and (
        mr.municipality is distinct from g.municipality
        or (
          m.municipality_key is not null
-         and (mr.data ->> m.municipality_key)
-           is distinct from coalesce(g.municipality, '')
+         and (mr.data ->> m.municipality_key) is distinct from coalesce(g.municipality, '')
        )
        or (
          m.barangay_key is not null
-         and (mr.data ->> m.barangay_key)
-           is distinct from coalesce(g.barangay, '')
+         and (mr.data ->> m.barangay_key) is distinct from coalesce(g.barangay, '')
        )
        or (
          m.client_status_key is not null
-         and (mr.data ->> m.client_status_key)
-           is distinct from coalesce(g.status, '')
+         and m.client_status_key <> mapping.beneficiary_key
+         and (mr.data ->> m.client_status_key) is distinct from coalesce(g.status, '')
+       )
+       or (
+         m.slug = 'for-concurrence'
+         and (mr.data ->> '__concurrence_grantee_match') is distinct from 'true'
+       )
+       or (
+         m.slug = 'for-concurrence'
+         and concurrence.field_key is not null
+         and coalesce(mr.data ->> '__concurrence_is_returning', 'false') <> 'true'
+         and (mr.values ->> concurrence.field_key) is distinct from concurrence.yes_value
        )
      );
 
   return null;
 end;
-$$;
+$_$;
 
 
 ALTER FUNCTION "public"."sync_changed_grantees_to_monitors"() OWNER TO "postgres";
@@ -2067,63 +3662,134 @@ ALTER FUNCTION "public"."sync_changed_grantees_to_monitors"() OWNER TO "postgres
 
 CREATE OR REPLACE FUNCTION "public"."sync_monitor_grantee_profiles"("p_monitor_id" "uuid" DEFAULT NULL::"uuid") RETURNS bigint
     LANGUAGE "plpgsql" SECURITY DEFINER
-    SET "search_path" TO 'public'
-    SET "statement_timeout" TO '30s'
-    AS $$
+    SET "search_path" TO ''
+    SET "statement_timeout" TO '45s'
+    AS $_$
 declare
   affected bigint := 0;
+  unmatched bigint := 0;
 begin
-  if auth.uid() is not null and not public.monitor_caller_is_editor() then
+  if (select auth.uid()) is not null
+     and not (select public.monitor_caller_is_editor()) then
     raise exception 'Editor access required';
   end if;
+
+  update public.monitor_row mr
+     set data = pg_catalog.jsonb_set(
+       coalesce(mr.data, '{}'::jsonb),
+       array['__concurrence_grantee_match'],
+       'false'::jsonb,
+       true
+     )
+    from public.monitor m
+   where mr.monitor_id = m.id
+     and m.slug = 'for-concurrence'
+     and (p_monitor_id is null or m.id = p_monitor_id)
+     and (mr.data ->> '__concurrence_grantee_match') is distinct from 'false'
+     and not exists (
+       select 1
+         from public.grantee_list missing_match
+        where missing_match.hh_id = mr.beneficiary_hh_id
+     );
+  get diagnostics unmatched = row_count;
 
   update public.monitor_row mr
      set beneficiary_hh_id = g.hh_id,
          municipality = g.municipality,
          data = mr.data
            || case when m.municipality_key is not null
-                   then jsonb_build_object(m.municipality_key, coalesce(g.municipality, ''))
+                   then pg_catalog.jsonb_build_object(m.municipality_key, coalesce(g.municipality, ''))
                    else '{}'::jsonb end
            || case when m.barangay_key is not null
-                   then jsonb_build_object(m.barangay_key, coalesce(g.barangay, ''))
+                   then pg_catalog.jsonb_build_object(m.barangay_key, coalesce(g.barangay, ''))
                    else '{}'::jsonb end
            || case when m.client_status_key is not null
-                   then jsonb_build_object(m.client_status_key, coalesce(g.status, ''))
+                         and m.client_status_key <> mapping.beneficiary_key
+                   then pg_catalog.jsonb_build_object(m.client_status_key, coalesce(g.status, ''))
                    else '{}'::jsonb end
+           || case when m.slug = 'for-concurrence'
+                   then pg_catalog.jsonb_build_object('__concurrence_grantee_match', true)
+                   else '{}'::jsonb end,
+         values = case
+           when m.slug = 'for-concurrence'
+                and concurrence.field_key is not null
+                and coalesce(mr.data ->> '__concurrence_is_returning', 'false') <> 'true'
+             then pg_catalog.jsonb_set(
+               coalesce(mr.values, '{}'::jsonb),
+               array[concurrence.field_key],
+               pg_catalog.to_jsonb(concurrence.yes_value),
+               true
+             )
+           else mr.values
+         end
     from public.monitor m
-    join public.grantee_list g
-      on true
+    cross join lateral (
+      select coalesce(
+        m.beneficiary_key,
+        case when m.slug = 'for-concurrence' then 'Listahanan ID' end
+      ) as beneficiary_key
+    ) mapping
+    left join lateral (
+      select
+        field ->> 'key' as field_key,
+        coalesce(
+          (
+            select option_value
+              from pg_catalog.jsonb_array_elements_text(coalesce(field -> 'options', '[]'::jsonb)) option_value
+             where option_value ~* '^(yes|true|concurred)$'
+             limit 1
+          ),
+          'Yes'
+        ) as yes_value
+        from pg_catalog.jsonb_array_elements(coalesce(m.fields, '[]'::jsonb)) field
+       where pg_catalog.regexp_replace(
+         lower(coalesce(field ->> 'label', '')),
+         '[^a-z0-9]+',
+         ' ',
+         'g'
+       ) = 'is concurred'
+       limit 1
+    ) concurrence on true
+    join public.grantee_list g on true
    where mr.monitor_id = m.id
-     and m.beneficiary_key is not null
+     and mapping.beneficiary_key is not null
      and (p_monitor_id is null or m.id = p_monitor_id)
      and g.hh_id = coalesce(
        nullif(btrim(mr.beneficiary_hh_id), ''),
-       nullif(btrim(mr.data ->> m.beneficiary_key), '')
+       nullif(btrim(mr.data ->> mapping.beneficiary_key), '')
      )
      and (
        mr.beneficiary_hh_id is distinct from g.hh_id
        or mr.municipality is distinct from g.municipality
        or (
          m.municipality_key is not null
-         and (mr.data ->> m.municipality_key)
-           is distinct from coalesce(g.municipality, '')
+         and (mr.data ->> m.municipality_key) is distinct from coalesce(g.municipality, '')
        )
        or (
          m.barangay_key is not null
-         and (mr.data ->> m.barangay_key)
-           is distinct from coalesce(g.barangay, '')
+         and (mr.data ->> m.barangay_key) is distinct from coalesce(g.barangay, '')
        )
        or (
          m.client_status_key is not null
-         and (mr.data ->> m.client_status_key)
-           is distinct from coalesce(g.status, '')
+         and m.client_status_key <> mapping.beneficiary_key
+         and (mr.data ->> m.client_status_key) is distinct from coalesce(g.status, '')
+       )
+       or (
+         m.slug = 'for-concurrence'
+         and (mr.data ->> '__concurrence_grantee_match') is distinct from 'true'
+       )
+       or (
+         m.slug = 'for-concurrence'
+         and concurrence.field_key is not null
+         and coalesce(mr.data ->> '__concurrence_is_returning', 'false') <> 'true'
+         and (mr.values ->> concurrence.field_key) is distinct from concurrence.yes_value
        )
      );
 
   get diagnostics affected = row_count;
-  return affected;
+  return affected + unmatched;
 end;
-$$;
+$_$;
 
 
 ALTER FUNCTION "public"."sync_monitor_grantee_profiles"("p_monitor_id" "uuid") OWNER TO "postgres";
@@ -2298,6 +3964,65 @@ CREATE TABLE IF NOT EXISTS "public"."cluster" (
 
 
 ALTER TABLE "public"."cluster" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "public"."concurrence_import_batch" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "monitor_id" "uuid" NOT NULL,
+    "filename" "text" NOT NULL,
+    "source_rows" integer NOT NULL,
+    "cavite_episodes" integer NOT NULL,
+    "duplicate_episode_keys" integer DEFAULT 0 NOT NULL,
+    "added_count" integer DEFAULT 0 NOT NULL,
+    "retained_count" integer DEFAULT 0 NOT NULL,
+    "returning_count" integer DEFAULT 0 NOT NULL,
+    "grantee_matched_count" integer DEFAULT 0 NOT NULL,
+    "protected_history_count" integer DEFAULT 0 NOT NULL,
+    "archived_count" integer DEFAULT 0 NOT NULL,
+    "unresolved_count" integer DEFAULT 0 NOT NULL,
+    "imported_by" "uuid",
+    "imported_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "concurrence_import_batch_added_count_check" CHECK (("added_count" >= 0)),
+    CONSTRAINT "concurrence_import_batch_archived_count_check" CHECK (("archived_count" >= 0)),
+    CONSTRAINT "concurrence_import_batch_cavite_episodes_check" CHECK (("cavite_episodes" > 0)),
+    CONSTRAINT "concurrence_import_batch_duplicate_episode_keys_check" CHECK (("duplicate_episode_keys" >= 0)),
+    CONSTRAINT "concurrence_import_batch_grantee_matched_count_check" CHECK (("grantee_matched_count" >= 0)),
+    CONSTRAINT "concurrence_import_batch_protected_history_count_check" CHECK (("protected_history_count" >= 0)),
+    CONSTRAINT "concurrence_import_batch_retained_count_check" CHECK (("retained_count" >= 0)),
+    CONSTRAINT "concurrence_import_batch_returning_count_check" CHECK (("returning_count" >= 0)),
+    CONSTRAINT "concurrence_import_batch_source_rows_check" CHECK (("source_rows" > 0)),
+    CONSTRAINT "concurrence_import_batch_unresolved_count_check" CHECK (("unresolved_count" >= 0))
+);
+
+
+ALTER TABLE "public"."concurrence_import_batch" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "public"."concurrence_import_batch" IS 'Atomic import results for the specialized for-concurrence CSV reconciliation workflow.';
+
+
+
+CREATE TABLE IF NOT EXISTS "public"."concurrence_row_archive" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "batch_id" "uuid" NOT NULL,
+    "monitor_id" "uuid" NOT NULL,
+    "original_row_id" "uuid" NOT NULL,
+    "concurrence_case_id" "text" NOT NULL,
+    "beneficiary_hh_id" "text",
+    "row_snapshot" "jsonb" NOT NULL,
+    "reason" "text" DEFAULT 'Absent from latest Cavite snapshot and Grantee List'::"text" NOT NULL,
+    "archived_by" "uuid",
+    "archived_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "restored_by" "uuid",
+    "restored_at" timestamp with time zone
+);
+
+
+ALTER TABLE "public"."concurrence_row_archive" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "public"."concurrence_row_archive" IS 'Recoverable cancellation candidates removed from the active Concurrence monitor by snapshot reconciliation.';
+
 
 
 CREATE TABLE IF NOT EXISTS "public"."email_directory" (
@@ -2612,11 +4337,69 @@ CREATE TABLE IF NOT EXISTS "public"."monitor_row" (
     "encoded_at" timestamp with time zone,
     "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
-    "beneficiary_hh_id" "text"
+    "beneficiary_hh_id" "text",
+    "person_id" "text"
 );
 
 
 ALTER TABLE "public"."monitor_row" OWNER TO "postgres";
+
+
+COMMENT ON COLUMN "public"."monitor_row"."person_id" IS 'Canonical normalized PERSON_ID used for indexed monitoring CSV match updates.';
+
+
+
+CREATE OR REPLACE VIEW "public"."monitor_row_with_assignment" WITH ("security_invoker"='true') AS
+ WITH "current_period" AS (
+         SELECT "selected_period"."id"
+           FROM "public"."ipcr_period" "selected_period"
+          ORDER BY
+                CASE
+                    WHEN ("selected_period"."status" = 'published'::"text") THEN 0
+                    ELSE 1
+                END, "selected_period"."starts_on" DESC, "selected_period"."created_at" DESC
+         LIMIT 1
+        ), "working_rules" AS (
+         SELECT DISTINCT ON ("assignment_rule"."scope_value_key") "assignment_rule"."scope_value_key" AS "hh_id_key",
+            "assignment_rule"."responsible_cm_user_id",
+            "assignment_rule"."updated_at"
+           FROM ("public"."ipcr_assignment_rule" "assignment_rule"
+             JOIN "current_period" "selected_period" ON (("selected_period"."id" = "assignment_rule"."period_id")))
+          WHERE (("assignment_rule"."scope_type" = 'hhid'::"text") AND ("assignment_rule"."status" = ANY (ARRAY['draft'::"text", 'published'::"text"])) AND ("assignment_rule"."scope_value_key" <> ''::"text"))
+          ORDER BY "assignment_rule"."scope_value_key", "assignment_rule"."updated_at" DESC
+        ), "applied_assignments" AS (
+         SELECT "upper"("btrim"("assignment_1"."hh_id")) AS "hh_id_key",
+            "assignment_1"."responsible_cm_user_id"
+           FROM ("public"."ipcr_household_assignment" "assignment_1"
+             JOIN "current_period" "selected_period" ON (("selected_period"."id" = "assignment_1"."period_id")))
+          WHERE ("assignment_1"."effective_to" IS NULL)
+        ), "effective_assignments" AS (
+         SELECT COALESCE("working"."hh_id_key", "assignment_1"."hh_id_key") AS "hh_id_key",
+            COALESCE("working"."responsible_cm_user_id", "assignment_1"."responsible_cm_user_id") AS "responsible_cm_user_id"
+           FROM ("applied_assignments" "assignment_1"
+             FULL JOIN "working_rules" "working" USING ("hh_id_key"))
+        )
+ SELECT "monitoring_row"."id",
+    "monitoring_row"."monitor_id",
+    "monitoring_row"."row_key",
+    "monitoring_row"."municipality",
+    "monitoring_row"."beneficiary_hh_id",
+    "monitoring_row"."data",
+    "monitoring_row"."values",
+    "monitoring_row"."encoded_by",
+    "monitoring_row"."encoded_at",
+    "monitoring_row"."created_at",
+    "monitoring_row"."updated_at",
+    "assignment"."responsible_cm_user_id" AS "assigned_case_manager_user_id"
+   FROM ("public"."monitor_row" "monitoring_row"
+     LEFT JOIN "effective_assignments" "assignment" ON (("assignment"."hh_id_key" = "upper"("btrim"("monitoring_row"."beneficiary_hh_id")))));
+
+
+ALTER VIEW "public"."monitor_row_with_assignment" OWNER TO "postgres";
+
+
+COMMENT ON VIEW "public"."monitor_row_with_assignment" IS 'RLS-aware monitoring rows with the current Caseload Inventory Case Manager resolved by HHID.';
+
 
 
 CREATE TABLE IF NOT EXISTS "public"."municipality" (
@@ -3067,6 +4850,16 @@ ALTER TABLE ONLY "public"."cluster"
 
 
 
+ALTER TABLE ONLY "public"."concurrence_import_batch"
+    ADD CONSTRAINT "concurrence_import_batch_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."concurrence_row_archive"
+    ADD CONSTRAINT "concurrence_row_archive_pkey" PRIMARY KEY ("id");
+
+
+
 ALTER TABLE ONLY "public"."email_directory"
     ADD CONSTRAINT "email_directory_pkey" PRIMARY KEY ("id");
 
@@ -3309,6 +5102,22 @@ CREATE INDEX "case_list_typology_name_trgm_idx" ON "public"."case_list" USING "g
 
 
 
+CREATE INDEX "concurrence_import_batch_monitor_date_idx" ON "public"."concurrence_import_batch" USING "btree" ("monitor_id", "imported_at" DESC);
+
+
+
+CREATE INDEX "concurrence_row_archive_active_idx" ON "public"."concurrence_row_archive" USING "btree" ("monitor_id", "archived_at" DESC) WHERE ("restored_at" IS NULL);
+
+
+
+CREATE INDEX "concurrence_row_archive_batch_idx" ON "public"."concurrence_row_archive" USING "btree" ("batch_id");
+
+
+
+CREATE INDEX "concurrence_row_archive_hhid_idx" ON "public"."concurrence_row_archive" USING "btree" ("monitor_id", "beneficiary_hh_id") WHERE (("restored_at" IS NULL) AND ("beneficiary_hh_id" IS NOT NULL));
+
+
+
 CREATE INDEX "email_directory_label_idx" ON "public"."email_directory" USING "btree" ("label");
 
 
@@ -3413,6 +5222,10 @@ CREATE INDEX "ipcr_assignment_cm_active_idx" ON "public"."ipcr_household_assignm
 
 
 
+CREATE INDEX "ipcr_assignment_current_period_hhid_idx" ON "public"."ipcr_household_assignment" USING "btree" ("period_id", "hh_id") WHERE ("effective_to" IS NULL);
+
+
+
 CREATE INDEX "ipcr_assignment_hhid_idx" ON "public"."ipcr_household_assignment" USING "btree" ("hh_id", "period_id");
 
 
@@ -3449,6 +5262,10 @@ CREATE INDEX "ipcr_rule_cm_idx" ON "public"."ipcr_assignment_rule" USING "btree"
 
 
 
+CREATE INDEX "ipcr_rule_current_hhid_lookup_idx" ON "public"."ipcr_assignment_rule" USING "btree" ("period_id", "scope_value_key", "updated_at" DESC) WHERE (("scope_type" = 'hhid'::"text") AND ("status" = ANY (ARRAY['draft'::"text", 'published'::"text"])));
+
+
+
 CREATE INDEX "ipcr_rule_period_status_idx" ON "public"."ipcr_assignment_rule" USING "btree" ("period_id", "status");
 
 
@@ -3482,6 +5299,10 @@ CREATE INDEX "monitor_row_monitor_idx" ON "public"."monitor_row" USING "btree" (
 
 
 CREATE INDEX "monitor_row_monitor_muni_row_key_idx" ON "public"."monitor_row" USING "btree" ("monitor_id", "municipality", "row_key");
+
+
+
+CREATE INDEX "monitor_row_monitor_person_id_idx" ON "public"."monitor_row" USING "btree" ("monitor_id", "person_id") WHERE ("person_id" IS NOT NULL);
 
 
 
@@ -3648,6 +5469,36 @@ ALTER TABLE ONLY "public"."case_list"
 
 ALTER TABLE ONLY "public"."case_list"
     ADD CONSTRAINT "case_list_hh_id_fkey" FOREIGN KEY ("hh_id") REFERENCES "public"."grantee_list"("hh_id") ON UPDATE CASCADE ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."concurrence_import_batch"
+    ADD CONSTRAINT "concurrence_import_batch_imported_by_fkey" FOREIGN KEY ("imported_by") REFERENCES "auth"."users"("id") ON DELETE SET NULL;
+
+
+
+ALTER TABLE ONLY "public"."concurrence_import_batch"
+    ADD CONSTRAINT "concurrence_import_batch_monitor_id_fkey" FOREIGN KEY ("monitor_id") REFERENCES "public"."monitor"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."concurrence_row_archive"
+    ADD CONSTRAINT "concurrence_row_archive_archived_by_fkey" FOREIGN KEY ("archived_by") REFERENCES "auth"."users"("id") ON DELETE SET NULL;
+
+
+
+ALTER TABLE ONLY "public"."concurrence_row_archive"
+    ADD CONSTRAINT "concurrence_row_archive_batch_id_fkey" FOREIGN KEY ("batch_id") REFERENCES "public"."concurrence_import_batch"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."concurrence_row_archive"
+    ADD CONSTRAINT "concurrence_row_archive_monitor_id_fkey" FOREIGN KEY ("monitor_id") REFERENCES "public"."monitor"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."concurrence_row_archive"
+    ADD CONSTRAINT "concurrence_row_archive_restored_by_fkey" FOREIGN KEY ("restored_by") REFERENCES "auth"."users"("id") ON DELETE SET NULL;
 
 
 
@@ -3964,6 +5815,20 @@ CREATE POLICY "cluster read" ON "public"."cluster" FOR SELECT TO "authenticated"
 
 
 
+CREATE POLICY "concurrence_archive_editor_read" ON "public"."concurrence_row_archive" FOR SELECT TO "authenticated" USING (( SELECT "public"."monitor_caller_is_editor"() AS "monitor_caller_is_editor"));
+
+
+
+CREATE POLICY "concurrence_batch_editor_read" ON "public"."concurrence_import_batch" FOR SELECT TO "authenticated" USING (( SELECT "public"."monitor_caller_is_editor"() AS "monitor_caller_is_editor"));
+
+
+
+ALTER TABLE "public"."concurrence_import_batch" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."concurrence_row_archive" ENABLE ROW LEVEL SECURITY;
+
+
 ALTER TABLE "public"."email_directory" ENABLE ROW LEVEL SECURITY;
 
 
@@ -4061,7 +5926,7 @@ CREATE POLICY "ipcr_proposal_read" ON "public"."ipcr_assignment_proposal" FOR SE
 
 
 
-CREATE POLICY "ipcr_rule_read" ON "public"."ipcr_assignment_rule" FOR SELECT TO "authenticated" USING ((( SELECT "private"."ipcr_is_editor"() AS "ipcr_is_editor") OR (("status" = 'published'::"text") AND ( SELECT "private"."ipcr_can_view_municipality"("ipcr_assignment_rule"."municipality") AS "ipcr_can_view_municipality"))));
+CREATE POLICY "ipcr_rule_read" ON "public"."ipcr_assignment_rule" FOR SELECT TO "authenticated" USING ((( SELECT "private"."ipcr_is_editor"() AS "ipcr_is_editor") OR (("status" = ANY (ARRAY['draft'::"text", 'published'::"text"])) AND ( SELECT "private"."ipcr_can_view_municipality"("ipcr_assignment_rule"."municipality") AS "ipcr_can_view_municipality"))));
 
 
 
@@ -4442,6 +6307,18 @@ GRANT ALL ON FUNCTION "public"."gtrgm_out"("public"."gtrgm") TO "service_role";
 
 
 
+REVOKE ALL ON FUNCTION "private"."concurrence_case_id"("p_hhid" "text", "p_episode_at" timestamp without time zone) FROM PUBLIC;
+
+
+
+REVOKE ALL ON FUNCTION "private"."concurrence_normalize_hhid"("p_value" "text") FROM PUBLIC;
+
+
+
+REVOKE ALL ON FUNCTION "private"."concurrence_parse_timestamp"("p_value" "text") FROM PUBLIC;
+
+
+
 REVOKE ALL ON FUNCTION "private"."ipcr_can_edit_monitor_row"("target_hh_id" "text", "target_municipality" "text") FROM PUBLIC;
 GRANT ALL ON FUNCTION "private"."ipcr_can_edit_monitor_row"("target_hh_id" "text", "target_municipality" "text") TO "authenticated";
 GRANT ALL ON FUNCTION "private"."ipcr_can_edit_monitor_row"("target_hh_id" "text", "target_municipality" "text") TO "service_role";
@@ -4479,6 +6356,36 @@ GRANT ALL ON FUNCTION "private"."ipcr_monitor_kpi_matches"("p_kpi" "jsonb", "p_d
 REVOKE ALL ON FUNCTION "private"."ipcr_visible_municipalities"() FROM PUBLIC;
 GRANT ALL ON FUNCTION "private"."ipcr_visible_municipalities"() TO "authenticated";
 GRANT ALL ON FUNCTION "private"."ipcr_visible_municipalities"() TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "private"."monitor_csv_field_is_visible"("p_field_key" "text", "p_values" "jsonb", "p_data" "jsonb", "p_fields" "jsonb", "p_visiting" "text"[]) FROM PUBLIC;
+GRANT ALL ON FUNCTION "private"."monitor_csv_field_is_visible"("p_field_key" "text", "p_values" "jsonb", "p_data" "jsonb", "p_fields" "jsonb", "p_visiting" "text"[]) TO "authenticated";
+GRANT ALL ON FUNCTION "private"."monitor_csv_field_is_visible"("p_field_key" "text", "p_values" "jsonb", "p_data" "jsonb", "p_fields" "jsonb", "p_visiting" "text"[]) TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "private"."reconcile_concurrence_snapshot_impl"("p_filename" "text", "p_rows" "jsonb") FROM PUBLIC;
+GRANT ALL ON FUNCTION "private"."reconcile_concurrence_snapshot_impl"("p_filename" "text", "p_rows" "jsonb") TO "authenticated";
+GRANT ALL ON FUNCTION "private"."reconcile_concurrence_snapshot_impl"("p_filename" "text", "p_rows" "jsonb") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "private"."restore_concurrence_row_impl"("p_archive_id" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "private"."restore_concurrence_row_impl"("p_archive_id" "uuid") TO "authenticated";
+GRANT ALL ON FUNCTION "private"."restore_concurrence_row_impl"("p_archive_id" "uuid") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."bulk_update_monitor_rows_from_csv"("p_monitor_id" "uuid", "p_match_mode" "text", "p_ids" "jsonb", "p_field_key" "text", "p_target_value" "jsonb", "p_apply" boolean) FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."bulk_update_monitor_rows_from_csv"("p_monitor_id" "uuid", "p_match_mode" "text", "p_ids" "jsonb", "p_field_key" "text", "p_target_value" "jsonb", "p_apply" boolean) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."bulk_update_monitor_rows_from_csv"("p_monitor_id" "uuid", "p_match_mode" "text", "p_ids" "jsonb", "p_field_key" "text", "p_target_value" "jsonb", "p_apply" boolean) TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."bulk_update_monitor_rows_from_csv_v2"("p_monitor_id" "uuid", "p_match_mode" "text", "p_ids" "jsonb", "p_field_key" "text", "p_target_value" "jsonb", "p_overwrite_existing" boolean, "p_apply" boolean) FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."bulk_update_monitor_rows_from_csv_v2"("p_monitor_id" "uuid", "p_match_mode" "text", "p_ids" "jsonb", "p_field_key" "text", "p_target_value" "jsonb", "p_overwrite_existing" boolean, "p_apply" boolean) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."bulk_update_monitor_rows_from_csv_v2"("p_monitor_id" "uuid", "p_match_mode" "text", "p_ids" "jsonb", "p_field_key" "text", "p_target_value" "jsonb", "p_overwrite_existing" boolean, "p_apply" boolean) TO "service_role";
 
 
 
@@ -4657,6 +6564,11 @@ GRANT ALL ON FUNCTION "public"."ipcr_assign_filtered_households"("p_period_id" "
 
 
 
+REVOKE ALL ON FUNCTION "public"."ipcr_assignment_summary"("p_period_id" "uuid", "p_municipalities" "text"[]) FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."ipcr_assignment_summary"("p_period_id" "uuid", "p_municipalities" "text"[]) TO "service_role";
+
+
+
 REVOKE ALL ON FUNCTION "public"."ipcr_client_status_options"() FROM PUBLIC;
 GRANT ALL ON FUNCTION "public"."ipcr_client_status_options"() TO "service_role";
 
@@ -4714,15 +6626,38 @@ GRANT ALL ON FUNCTION "public"."monitor_caller_is_editor"() TO "service_role";
 
 
 
+REVOKE ALL ON FUNCTION "public"."monitor_case_manager_options"("p_monitor_id" "uuid", "p_municipalities" "text"[]) FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."monitor_case_manager_options"("p_monitor_id" "uuid", "p_municipalities" "text"[]) TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."monitor_csv_replacement_preview"("p_monitor_id" "uuid", "p_match_mode" "text", "p_ids" "jsonb", "p_field_key" "text", "p_target_value" "jsonb") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."monitor_csv_replacement_preview"("p_monitor_id" "uuid", "p_match_mode" "text", "p_ids" "jsonb", "p_field_key" "text", "p_target_value" "jsonb") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."monitor_csv_replacement_preview"("p_monitor_id" "uuid", "p_match_mode" "text", "p_ids" "jsonb", "p_field_key" "text", "p_target_value" "jsonb") TO "service_role";
+
+
+
 GRANT ALL ON FUNCTION "public"."next_transfer_referral_id"() TO "anon";
 GRANT ALL ON FUNCTION "public"."next_transfer_referral_id"() TO "authenticated";
 GRANT ALL ON FUNCTION "public"."next_transfer_referral_id"() TO "service_role";
 
 
 
+REVOKE ALL ON FUNCTION "public"."reconcile_concurrence_snapshot"("filename" "text", "rows" "jsonb") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."reconcile_concurrence_snapshot"("filename" "text", "rows" "jsonb") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."reconcile_concurrence_snapshot"("filename" "text", "rows" "jsonb") TO "service_role";
+
+
+
 GRANT ALL ON FUNCTION "public"."refresh_grantee_lhf"() TO "anon";
 GRANT ALL ON FUNCTION "public"."refresh_grantee_lhf"() TO "authenticated";
 GRANT ALL ON FUNCTION "public"."refresh_grantee_lhf"() TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."restore_concurrence_row"("archive_id" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."restore_concurrence_row"("archive_id" "uuid") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."restore_concurrence_row"("archive_id" "uuid") TO "service_role";
 
 
 
@@ -4837,14 +6772,12 @@ GRANT ALL ON FUNCTION "public"."swdi_gap_counts"("p_munis" "text"[]) TO "service
 
 
 
-GRANT ALL ON FUNCTION "public"."sync_changed_grantees_to_monitors"() TO "anon";
-GRANT ALL ON FUNCTION "public"."sync_changed_grantees_to_monitors"() TO "authenticated";
+REVOKE ALL ON FUNCTION "public"."sync_changed_grantees_to_monitors"() FROM PUBLIC;
 GRANT ALL ON FUNCTION "public"."sync_changed_grantees_to_monitors"() TO "service_role";
 
 
 
 REVOKE ALL ON FUNCTION "public"."sync_monitor_grantee_profiles"("p_monitor_id" "uuid") FROM PUBLIC;
-GRANT ALL ON FUNCTION "public"."sync_monitor_grantee_profiles"("p_monitor_id" "uuid") TO "anon";
 GRANT ALL ON FUNCTION "public"."sync_monitor_grantee_profiles"("p_monitor_id" "uuid") TO "authenticated";
 GRANT ALL ON FUNCTION "public"."sync_monitor_grantee_profiles"("p_monitor_id" "uuid") TO "service_role";
 
@@ -4966,6 +6899,16 @@ GRANT ALL ON TABLE "public"."cluster" TO "service_role";
 
 
 
+GRANT ALL ON TABLE "public"."concurrence_import_batch" TO "service_role";
+GRANT SELECT ON TABLE "public"."concurrence_import_batch" TO "authenticated";
+
+
+
+GRANT ALL ON TABLE "public"."concurrence_row_archive" TO "service_role";
+GRANT SELECT ON TABLE "public"."concurrence_row_archive" TO "authenticated";
+
+
+
 GRANT ALL ON TABLE "public"."email_directory" TO "anon";
 GRANT ALL ON TABLE "public"."email_directory" TO "authenticated";
 GRANT ALL ON TABLE "public"."email_directory" TO "service_role";
@@ -5051,6 +6994,11 @@ GRANT ALL ON TABLE "public"."monitor" TO "service_role";
 GRANT ALL ON TABLE "public"."monitor_row" TO "anon";
 GRANT ALL ON TABLE "public"."monitor_row" TO "authenticated";
 GRANT ALL ON TABLE "public"."monitor_row" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."monitor_row_with_assignment" TO "authenticated";
+GRANT ALL ON TABLE "public"."monitor_row_with_assignment" TO "service_role";
 
 
 
