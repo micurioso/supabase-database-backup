@@ -114,6 +114,61 @@ $_$;
 ALTER FUNCTION "private"."concurrence_parse_timestamp"("p_value" "text") OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "private"."ipcr_assignment_rule_delete_mapping_trigger"() RETURNS "trigger"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+begin
+  perform private.ipcr_sync_changed_assignment_rules(
+    coalesce((select jsonb_agg(to_jsonb(changed)) from old_rules changed), '[]'::jsonb)
+  );
+  return null;
+end;
+$$;
+
+
+ALTER FUNCTION "private"."ipcr_assignment_rule_delete_mapping_trigger"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "private"."ipcr_assignment_rule_insert_mapping_trigger"() RETURNS "trigger"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+begin
+  perform private.ipcr_sync_changed_assignment_rules(
+    coalesce((select jsonb_agg(to_jsonb(changed)) from new_rules changed), '[]'::jsonb)
+  );
+  return null;
+end;
+$$;
+
+
+ALTER FUNCTION "private"."ipcr_assignment_rule_insert_mapping_trigger"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "private"."ipcr_assignment_rule_update_mapping_trigger"() RETURNS "trigger"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+begin
+  perform private.ipcr_sync_changed_assignment_rules(
+    coalesce((
+      select jsonb_agg(to_jsonb(changed))
+      from (
+        select old_row.* from old_rules old_row
+        union all
+        select new_row.* from new_rules new_row
+      ) changed
+    ), '[]'::jsonb)
+  );
+  return null;
+end;
+$$;
+
+
+ALTER FUNCTION "private"."ipcr_assignment_rule_update_mapping_trigger"() OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "private"."ipcr_can_edit_monitor_row"("target_hh_id" "text", "target_municipality" "text") RETURNS boolean
     LANGUAGE "sql" STABLE SECURITY DEFINER
     SET "search_path" TO ''
@@ -282,6 +337,139 @@ $$;
 
 
 ALTER FUNCTION "private"."ipcr_flag_household_profile_change"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "private"."ipcr_grantee_delete_mapping_trigger"() RETURNS "trigger"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+begin
+  perform private.ipcr_sync_changed_grantee_rows(
+    coalesce((select jsonb_agg(to_jsonb(changed)) from old_grantees changed), '[]'::jsonb)
+  );
+  return null;
+end;
+$$;
+
+
+ALTER FUNCTION "private"."ipcr_grantee_delete_mapping_trigger"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "private"."ipcr_grantee_insert_mapping_trigger"() RETURNS "trigger"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+begin
+  perform private.ipcr_sync_changed_grantee_rows(
+    coalesce((select jsonb_agg(to_jsonb(changed)) from new_grantees changed), '[]'::jsonb)
+  );
+  return null;
+end;
+$$;
+
+
+ALTER FUNCTION "private"."ipcr_grantee_insert_mapping_trigger"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "private"."ipcr_grantee_update_mapping_trigger"() RETURNS "trigger"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+declare
+  v_rows jsonb;
+begin
+  select coalesce(jsonb_agg(to_jsonb(changed)), '[]'::jsonb)
+  into v_rows
+  from (
+    select old_row.*
+    from old_grantees old_row
+    join new_grantees new_row on new_row.id = old_row.id
+    where upper(btrim(old_row.hh_id)) is distinct from upper(btrim(new_row.hh_id))
+       or upper(btrim(coalesce(old_row.municipality, ''))) is distinct from
+          upper(btrim(coalesce(new_row.municipality, '')))
+       or upper(btrim(coalesce(old_row.barangay, ''))) is distinct from
+          upper(btrim(coalesce(new_row.barangay, '')))
+       or upper(btrim(coalesce(old_row.set_group, ''))) is distinct from
+          upper(btrim(coalesce(new_row.set_group, '')))
+
+    union all
+
+    select new_row.*
+    from old_grantees old_row
+    join new_grantees new_row on new_row.id = old_row.id
+    where upper(btrim(old_row.hh_id)) is distinct from upper(btrim(new_row.hh_id))
+       or upper(btrim(coalesce(old_row.municipality, ''))) is distinct from
+          upper(btrim(coalesce(new_row.municipality, '')))
+       or upper(btrim(coalesce(old_row.barangay, ''))) is distinct from
+          upper(btrim(coalesce(new_row.barangay, '')))
+       or upper(btrim(coalesce(old_row.set_group, ''))) is distinct from
+          upper(btrim(coalesce(new_row.set_group, '')))
+  ) changed;
+
+  if pg_catalog.jsonb_array_length(v_rows) > 0 then
+    perform private.ipcr_sync_changed_grantee_rows(v_rows);
+  end if;
+  return null;
+end;
+$$;
+
+
+ALTER FUNCTION "private"."ipcr_grantee_update_mapping_trigger"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "private"."ipcr_household_assignment_delete_mapping_trigger"() RETURNS "trigger"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+begin
+  perform private.ipcr_sync_changed_household_assignments(
+    coalesce((select jsonb_agg(to_jsonb(changed)) from old_assignments changed), '[]'::jsonb)
+  );
+  return null;
+end;
+$$;
+
+
+ALTER FUNCTION "private"."ipcr_household_assignment_delete_mapping_trigger"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "private"."ipcr_household_assignment_insert_mapping_trigger"() RETURNS "trigger"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+begin
+  perform private.ipcr_sync_changed_household_assignments(
+    coalesce((select jsonb_agg(to_jsonb(changed)) from new_assignments changed), '[]'::jsonb)
+  );
+  return null;
+end;
+$$;
+
+
+ALTER FUNCTION "private"."ipcr_household_assignment_insert_mapping_trigger"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "private"."ipcr_household_assignment_update_mapping_trigger"() RETURNS "trigger"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+begin
+  perform private.ipcr_sync_changed_household_assignments(
+    coalesce((
+      select jsonb_agg(to_jsonb(changed))
+      from (
+        select old_row.* from old_assignments old_row
+        union all
+        select new_row.* from new_assignments new_row
+      ) changed
+    ), '[]'::jsonb)
+  );
+  return null;
+end;
+$$;
+
+
+ALTER FUNCTION "private"."ipcr_household_assignment_update_mapping_trigger"() OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "private"."ipcr_is_editor"() RETURNS boolean
@@ -868,6 +1056,173 @@ COMMENT ON FUNCTION "private"."ipcr_monitor_row_owner"("p_hh_id" "text", "p_muni
 
 
 
+CREATE OR REPLACE FUNCTION "private"."ipcr_rebuild_case_manager_area_owners"("p_period_id" "uuid", "p_areas" "jsonb") RETURNS bigint
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    SET "statement_timeout" TO '45s'
+    AS $$
+declare
+  v_inserted bigint := 0;
+begin
+  if p_period_id is null
+     or pg_catalog.jsonb_typeof(coalesce(p_areas, '[]'::jsonb)) <> 'array'
+     or pg_catalog.jsonb_array_length(coalesce(p_areas, '[]'::jsonb)) = 0 then
+    return 0;
+  end if;
+
+  create temporary table if not exists pg_temp.ipcr_refresh_areas (
+    municipality_key text not null,
+    barangay_key text not null,
+    primary key (municipality_key, barangay_key)
+  ) on commit drop;
+  truncate table pg_temp.ipcr_refresh_areas;
+
+  insert into pg_temp.ipcr_refresh_areas (municipality_key, barangay_key)
+  with requested as materialized (
+    select distinct
+      upper(btrim(coalesce(area.municipality_key, ''))) as municipality_key,
+      upper(btrim(coalesce(area.barangay_key, ''))) as barangay_key
+    from pg_catalog.jsonb_to_recordset(p_areas) as area(
+      municipality_key text,
+      barangay_key text
+    )
+    where coalesce(btrim(area.municipality_key), '') <> ''
+  )
+  select distinct
+    upper(btrim(coalesce(grantee.municipality, ''))) as municipality_key,
+    upper(btrim(coalesce(grantee.barangay, ''))) as barangay_key
+  from requested
+  join public.grantee_list grantee
+    on upper(btrim(coalesce(grantee.municipality, ''))) = requested.municipality_key
+   and (
+     requested.barangay_key = ''
+     or upper(btrim(coalesce(grantee.barangay, ''))) = requested.barangay_key
+   )
+  where coalesce(btrim(grantee.barangay), '') <> ''
+  on conflict do nothing;
+
+  delete from private.ipcr_case_manager_area_owner cached
+  using pg_temp.ipcr_refresh_areas area
+  where cached.period_id = p_period_id
+    and cached.municipality_key = area.municipality_key
+    and cached.barangay_key = area.barangay_key;
+
+  with area_grantees as materialized (
+    select
+      grantee.id as grantee_id,
+      upper(btrim(grantee.hh_id)) as hh_id_key,
+      area.municipality_key,
+      area.barangay_key,
+      upper(btrim(coalesce(grantee.set_group, ''))) as set_group_key
+    from pg_temp.ipcr_refresh_areas area
+    join public.grantee_list grantee
+      on upper(btrim(coalesce(grantee.municipality, ''))) = area.municipality_key
+     and upper(btrim(coalesce(grantee.barangay, ''))) = area.barangay_key
+  ), exact_candidates as materialized (
+    select
+      grantee.grantee_id,
+      grantee.municipality_key,
+      grantee.barangay_key,
+      grantee.set_group_key,
+      assignment_rule.responsible_cm_user_id,
+      2 as source_priority,
+      assignment_rule.updated_at as source_at,
+      assignment_rule.id as source_id
+    from area_grantees grantee
+    join public.ipcr_assignment_rule assignment_rule
+      on assignment_rule.period_id = p_period_id
+     and assignment_rule.scope_type = 'hhid'
+     and assignment_rule.status in ('draft', 'published')
+     and assignment_rule.scope_value_key = grantee.hh_id_key
+
+    union all
+
+    select
+      grantee.grantee_id,
+      grantee.municipality_key,
+      grantee.barangay_key,
+      grantee.set_group_key,
+      assignment.responsible_cm_user_id,
+      1 as source_priority,
+      assignment.effective_from as source_at,
+      assignment.id as source_id
+    from area_grantees grantee
+    join public.ipcr_household_assignment assignment
+      on assignment.period_id = p_period_id
+     and assignment.effective_to is null
+     and upper(btrim(assignment.hh_id)) = grantee.hh_id_key
+  ), exact_resolved as materialized (
+    select distinct on (candidate.grantee_id)
+      candidate.grantee_id,
+      candidate.municipality_key,
+      candidate.barangay_key,
+      candidate.set_group_key,
+      candidate.responsible_cm_user_id
+    from exact_candidates candidate
+    order by
+      candidate.grantee_id,
+      candidate.source_priority desc,
+      candidate.source_at desc,
+      candidate.source_id desc
+  ), set_group_owners as materialized (
+    select
+      exact.municipality_key,
+      exact.barangay_key,
+      exact.set_group_key,
+      (array_agg(distinct exact.responsible_cm_user_id))[1] as owner_id
+    from exact_resolved exact
+    where exact.set_group_key <> ''
+    group by exact.municipality_key, exact.barangay_key, exact.set_group_key
+    having count(distinct exact.responsible_cm_user_id) = 1
+  ), barangay_owners as materialized (
+    select
+      exact.municipality_key,
+      exact.barangay_key,
+      (array_agg(distinct exact.responsible_cm_user_id))[1] as owner_id
+    from exact_resolved exact
+    group by exact.municipality_key, exact.barangay_key
+    having count(distinct exact.responsible_cm_user_id) = 1
+  )
+  insert into private.ipcr_case_manager_area_owner (
+    period_id,
+    municipality_key,
+    barangay_key,
+    set_group_key,
+    responsible_cm_user_id,
+    assignment_scope,
+    updated_at
+  )
+  select
+    p_period_id,
+    owner.municipality_key,
+    owner.barangay_key,
+    owner.set_group_key,
+    owner.owner_id,
+    'barangay_set_assignment',
+    now()
+  from set_group_owners owner
+
+  union all
+
+  select
+    p_period_id,
+    owner.municipality_key,
+    owner.barangay_key,
+    '',
+    owner.owner_id,
+    'barangay_assignment',
+    now()
+  from barangay_owners owner;
+
+  get diagnostics v_inserted = row_count;
+  return v_inserted;
+end;
+$$;
+
+
+ALTER FUNCTION "private"."ipcr_rebuild_case_manager_area_owners"("p_period_id" "uuid", "p_areas" "jsonb") OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "private"."ipcr_refresh_grantee_case_manager_mapping"() RETURNS "jsonb"
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO ''
@@ -1180,11 +1535,556 @@ COMMENT ON FUNCTION "private"."ipcr_refresh_grantee_case_manager_mapping"() IS '
 
 
 
+CREATE OR REPLACE FUNCTION "private"."ipcr_refresh_grantee_case_manager_mapping_subset"("p_period_id" "uuid", "p_hh_id_keys" "text"[] DEFAULT NULL::"text"[], "p_areas" "jsonb" DEFAULT '[]'::"jsonb") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    SET "statement_timeout" TO '45s'
+    AS $$
+declare
+  v_current_period_id uuid;
+  v_now timestamptz := now();
+  v_candidates bigint := 0;
+  v_mapped bigint := 0;
+  v_updated bigint := 0;
+  v_cleared bigint := 0;
+begin
+  select period.id
+  into v_current_period_id
+  from public.ipcr_period period
+  order by
+    case when period.status = 'published' then 0 else 1 end,
+    period.starts_on desc,
+    period.created_at desc
+  limit 1;
+
+  if v_current_period_id is null
+     or p_period_id is distinct from v_current_period_id then
+    return pg_catalog.jsonb_build_object(
+      'period_id', p_period_id,
+      'current_period_id', v_current_period_id,
+      'candidates', 0,
+      'mapped', 0,
+      'updated', 0,
+      'cleared', 0
+    );
+  end if;
+
+  if pg_catalog.jsonb_typeof(coalesce(p_areas, '[]'::jsonb)) = 'array'
+     and pg_catalog.jsonb_array_length(coalesce(p_areas, '[]'::jsonb)) > 0 then
+    perform private.ipcr_rebuild_case_manager_area_owners(p_period_id, p_areas);
+  end if;
+
+  with requested_hhids as materialized (
+    select distinct upper(btrim(requested.hh_id_key)) as hh_id_key
+    from unnest(coalesce(p_hh_id_keys, '{}'::text[])) requested(hh_id_key)
+    where coalesce(btrim(requested.hh_id_key), '') <> ''
+  ), requested_areas as materialized (
+    select distinct
+      upper(btrim(coalesce(requested.municipality_key, ''))) as municipality_key,
+      upper(btrim(coalesce(requested.barangay_key, ''))) as barangay_key
+    from pg_catalog.jsonb_to_recordset(
+      case
+        when pg_catalog.jsonb_typeof(coalesce(p_areas, '[]'::jsonb)) = 'array'
+          then coalesce(p_areas, '[]'::jsonb)
+        else '[]'::jsonb
+      end
+    ) as requested(municipality_key text, barangay_key text)
+    where coalesce(btrim(requested.municipality_key), '') <> ''
+  ), candidate_ids as materialized (
+    select grantee.id
+    from requested_hhids requested
+    join public.grantee_list grantee
+      on upper(btrim(grantee.hh_id)) = requested.hh_id_key
+
+    union
+
+    select grantee.id
+    from requested_areas requested
+    join public.grantee_list grantee
+      on upper(btrim(coalesce(grantee.municipality, ''))) = requested.municipality_key
+     and (
+       requested.barangay_key = ''
+       or upper(btrim(coalesce(grantee.barangay, ''))) = requested.barangay_key
+     )
+  ), candidate_grantees as materialized (
+    select
+      grantee.id as grantee_id,
+      upper(btrim(grantee.hh_id)) as hh_id_key,
+      upper(btrim(coalesce(grantee.municipality, ''))) as municipality_key,
+      upper(btrim(coalesce(grantee.barangay, ''))) as barangay_key,
+      upper(btrim(coalesce(grantee.set_group, ''))) as set_group_key,
+      upper(btrim(coalesce(classification.classification, ''))) as classification_key
+    from candidate_ids candidate
+    join public.grantee_list grantee on grantee.id = candidate.id
+    left join public.ipcr_set_group_classification classification
+      on classification.code_key = upper(btrim(coalesce(grantee.set_group, '')))
+  ), exact_candidates as materialized (
+    select
+      candidate.grantee_id,
+      assignment_rule.responsible_cm_user_id,
+      2 as source_priority,
+      assignment_rule.updated_at as source_at,
+      assignment_rule.id as source_id
+    from candidate_grantees candidate
+    join public.ipcr_assignment_rule assignment_rule
+      on assignment_rule.period_id = p_period_id
+     and assignment_rule.scope_type = 'hhid'
+     and assignment_rule.status in ('draft', 'published')
+     and assignment_rule.scope_value_key = candidate.hh_id_key
+
+    union all
+
+    select
+      candidate.grantee_id,
+      assignment.responsible_cm_user_id,
+      1 as source_priority,
+      assignment.effective_from as source_at,
+      assignment.id as source_id
+    from candidate_grantees candidate
+    join public.ipcr_household_assignment assignment
+      on assignment.period_id = p_period_id
+     and assignment.effective_to is null
+     and upper(btrim(assignment.hh_id)) = candidate.hh_id_key
+  ), exact_resolved as materialized (
+    select distinct on (exact.grantee_id)
+      exact.grantee_id,
+      exact.responsible_cm_user_id,
+      'hhid'::text as assignment_scope
+    from exact_candidates exact
+    order by
+      exact.grantee_id,
+      exact.source_priority desc,
+      exact.source_at desc,
+      exact.source_id desc
+  ), geographic_candidates as materialized (
+    select
+      candidate.grantee_id,
+      assignment_rule.responsible_cm_user_id,
+      case
+        when assignment_rule.scope_type = 'set_group'
+          and assignment_rule.barangay_key <> '' then 'barangay_set_rule'
+        when assignment_rule.scope_type = 'set_group' then 'set_group_rule'
+        when assignment_rule.scope_type = 'classification'
+          and assignment_rule.barangay_key <> '' then 'barangay_classification_rule'
+        when assignment_rule.scope_type = 'classification' then 'classification_rule'
+        when assignment_rule.scope_type = 'barangay' then 'barangay_rule'
+        else 'municipality_rule'
+      end as assignment_scope,
+      row_number() over (
+        partition by candidate.grantee_id
+        order by
+          case assignment_rule.scope_type
+            when 'set_group' then case when assignment_rule.barangay_key <> '' then 600 else 590 end
+            when 'classification' then case when assignment_rule.barangay_key <> '' then 500 else 490 end
+            when 'barangay' then 400
+            else 300
+          end desc,
+          assignment_rule.updated_at desc,
+          assignment_rule.id desc
+      ) as precedence
+    from candidate_grantees candidate
+    join public.ipcr_assignment_rule assignment_rule
+      on assignment_rule.period_id = p_period_id
+     and assignment_rule.status in ('draft', 'published')
+     and assignment_rule.scope_type <> 'hhid'
+     and assignment_rule.municipality_key = candidate.municipality_key
+    where not exists (
+        select 1 from exact_resolved exact
+        where exact.grantee_id = candidate.grantee_id
+      )
+      and case assignment_rule.scope_type
+        when 'set_group' then
+          candidate.set_group_key <> ''
+          and assignment_rule.scope_value_key = candidate.set_group_key
+          and assignment_rule.barangay_key in ('', candidate.barangay_key)
+        when 'classification' then
+          candidate.classification_key <> ''
+          and assignment_rule.scope_value_key = candidate.classification_key
+          and assignment_rule.barangay_key in ('', candidate.barangay_key)
+        when 'barangay' then
+          candidate.barangay_key <> ''
+          and assignment_rule.barangay_key = candidate.barangay_key
+        when 'municipality' then true
+        else false
+      end
+  ), explicit_resolved as materialized (
+    select
+      geographic.grantee_id,
+      geographic.responsible_cm_user_id,
+      geographic.assignment_scope
+    from geographic_candidates geographic
+    where geographic.precedence = 1
+  ), inferred_resolved as materialized (
+    select
+      candidate.grantee_id,
+      coalesce(set_owner.responsible_cm_user_id, barangay_owner.responsible_cm_user_id)
+        as responsible_cm_user_id,
+      coalesce(set_owner.assignment_scope, barangay_owner.assignment_scope)
+        as assignment_scope
+    from candidate_grantees candidate
+    left join private.ipcr_case_manager_area_owner set_owner
+      on set_owner.period_id = p_period_id
+     and set_owner.municipality_key = candidate.municipality_key
+     and set_owner.barangay_key = candidate.barangay_key
+     and set_owner.set_group_key = candidate.set_group_key
+     and candidate.set_group_key <> ''
+    left join private.ipcr_case_manager_area_owner barangay_owner
+      on barangay_owner.period_id = p_period_id
+     and barangay_owner.municipality_key = candidate.municipality_key
+     and barangay_owner.barangay_key = candidate.barangay_key
+     and barangay_owner.set_group_key = ''
+    where not exists (
+        select 1 from exact_resolved exact
+        where exact.grantee_id = candidate.grantee_id
+      )
+      and not exists (
+        select 1 from explicit_resolved explicit
+        where explicit.grantee_id = candidate.grantee_id
+      )
+      and coalesce(
+        set_owner.responsible_cm_user_id,
+        barangay_owner.responsible_cm_user_id
+      ) is not null
+  ), resolved as materialized (
+    select exact.grantee_id, exact.responsible_cm_user_id, exact.assignment_scope
+    from exact_resolved exact
+
+    union all
+
+    select explicit.grantee_id, explicit.responsible_cm_user_id, explicit.assignment_scope
+    from explicit_resolved explicit
+
+    union all
+
+    select inferred.grantee_id, inferred.responsible_cm_user_id, inferred.assignment_scope
+    from inferred_resolved inferred
+  ), resolved_with_staff as materialized (
+    select
+      resolved.grantee_id,
+      resolved.responsible_cm_user_id,
+      coalesce(nullif(btrim(staff_member.full_name), ''), 'Unnamed Case Manager')
+        as case_manager_name,
+      resolved.assignment_scope
+    from resolved
+    join public.staff staff_member
+      on staff_member.user_id = resolved.responsible_cm_user_id
+  ), mapped_updates as (
+    update public.grantee_list grantee
+    set
+      mapped_case_manager_user_id = resolved.responsible_cm_user_id,
+      mapped_case_manager_name = resolved.case_manager_name,
+      mapped_case_manager_scope = resolved.assignment_scope,
+      mapped_case_manager_period_id = p_period_id,
+      mapped_case_manager_synced_at = v_now
+    from resolved_with_staff resolved
+    where grantee.id = resolved.grantee_id
+      and (
+        grantee.mapped_case_manager_user_id is distinct from resolved.responsible_cm_user_id
+        or grantee.mapped_case_manager_name is distinct from resolved.case_manager_name
+        or grantee.mapped_case_manager_scope is distinct from resolved.assignment_scope
+        or grantee.mapped_case_manager_period_id is distinct from p_period_id
+      )
+    returning grantee.id
+  ), cleared_updates as (
+    update public.grantee_list grantee
+    set
+      mapped_case_manager_user_id = null,
+      mapped_case_manager_name = null,
+      mapped_case_manager_scope = null,
+      mapped_case_manager_period_id = p_period_id,
+      mapped_case_manager_synced_at = v_now
+    from candidate_ids candidate
+    where grantee.id = candidate.id
+      and not exists (
+        select 1 from resolved_with_staff resolved
+        where resolved.grantee_id = grantee.id
+      )
+      and (
+        grantee.mapped_case_manager_user_id is not null
+        or grantee.mapped_case_manager_name is not null
+        or grantee.mapped_case_manager_scope is not null
+        or grantee.mapped_case_manager_period_id is distinct from p_period_id
+      )
+    returning grantee.id
+  )
+  select
+    (select count(*) from candidate_ids),
+    (select count(*) from resolved_with_staff),
+    (select count(*) from mapped_updates),
+    (select count(*) from cleared_updates)
+  into v_candidates, v_mapped, v_updated, v_cleared;
+
+  return pg_catalog.jsonb_build_object(
+    'period_id', p_period_id,
+    'candidates', v_candidates,
+    'mapped', v_mapped,
+    'updated', v_updated,
+    'cleared', v_cleared
+  );
+end;
+$$;
+
+
+ALTER FUNCTION "private"."ipcr_refresh_grantee_case_manager_mapping_subset"("p_period_id" "uuid", "p_hh_id_keys" "text"[], "p_areas" "jsonb") OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "private"."ipcr_refresh_grantee_case_manager_mapping_subset"("p_period_id" "uuid", "p_hh_id_keys" "text"[], "p_areas" "jsonb") IS 'Refreshes Case Manager ownership only for requested HHIDs or municipality/barangay areas.';
+
+
+
+CREATE OR REPLACE FUNCTION "private"."ipcr_sync_changed_assignment_rules"("p_rows" "jsonb") RETURNS "void"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+declare
+  v_period_id uuid;
+  v_hh_ids text[] := '{}'::text[];
+  v_areas jsonb := '[]'::jsonb;
+begin
+  if pg_catalog.current_setting(
+    'private.skip_grantee_case_manager_mapping_refresh', true
+  ) = 'on' then
+    return;
+  end if;
+
+  select period.id
+  into v_period_id
+  from public.ipcr_period period
+  order by
+    case when period.status = 'published' then 0 else 1 end,
+    period.starts_on desc,
+    period.created_at desc
+  limit 1;
+
+  if v_period_id is null then
+    return;
+  end if;
+
+  with changed as materialized (
+    select
+      row_value.period_id,
+      row_value.scope_type,
+      upper(btrim(coalesce(row_value.municipality_key, ''))) as municipality_key,
+      upper(btrim(coalesce(row_value.barangay_key, ''))) as barangay_key,
+      upper(btrim(coalesce(row_value.scope_value_key, ''))) as scope_value_key,
+      row_value.status
+    from pg_catalog.jsonb_to_recordset(coalesce(p_rows, '[]'::jsonb)) as row_value(
+      period_id uuid,
+      scope_type text,
+      municipality_key text,
+      barangay_key text,
+      scope_value_key text,
+      status text
+    )
+    where row_value.period_id = v_period_id
+      and row_value.status in ('draft', 'published')
+  ), hhids as (
+    select distinct changed.scope_value_key as hh_id_key
+    from changed
+    where changed.scope_type = 'hhid'
+      and changed.scope_value_key <> ''
+  ), area_rows as (
+    select distinct
+      changed.municipality_key,
+      changed.barangay_key
+    from changed
+    where changed.scope_type <> 'hhid'
+      and changed.municipality_key <> ''
+
+    union
+
+    select distinct
+      upper(btrim(coalesce(grantee.municipality, ''))) as municipality_key,
+      upper(btrim(coalesce(grantee.barangay, ''))) as barangay_key
+    from hhids changed_hhid
+    join public.grantee_list grantee
+      on upper(btrim(grantee.hh_id)) = changed_hhid.hh_id_key
+    where coalesce(btrim(grantee.municipality), '') <> ''
+  )
+  select
+    coalesce((select array_agg(hhids.hh_id_key) from hhids), '{}'::text[]),
+    coalesce((
+      select jsonb_agg(jsonb_build_object(
+        'municipality_key', area.municipality_key,
+        'barangay_key', area.barangay_key
+      ))
+      from area_rows area
+    ), '[]'::jsonb)
+  into v_hh_ids, v_areas;
+
+  if cardinality(v_hh_ids) > 0 or pg_catalog.jsonb_array_length(v_areas) > 0 then
+    perform private.ipcr_refresh_grantee_case_manager_mapping_subset(
+      v_period_id,
+      v_hh_ids,
+      v_areas
+    );
+  end if;
+end;
+$$;
+
+
+ALTER FUNCTION "private"."ipcr_sync_changed_assignment_rules"("p_rows" "jsonb") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "private"."ipcr_sync_changed_grantee_rows"("p_rows" "jsonb") RETURNS "void"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+declare
+  v_period_id uuid;
+  v_hh_ids text[] := '{}'::text[];
+  v_areas jsonb := '[]'::jsonb;
+begin
+  if pg_catalog.current_setting(
+    'private.skip_grantee_case_manager_mapping_refresh', true
+  ) = 'on' then
+    return;
+  end if;
+
+  select period.id
+  into v_period_id
+  from public.ipcr_period period
+  order by
+    case when period.status = 'published' then 0 else 1 end,
+    period.starts_on desc,
+    period.created_at desc
+  limit 1;
+
+  if v_period_id is null then
+    return;
+  end if;
+
+  with changed as materialized (
+    select
+      upper(btrim(coalesce(row_value.hh_id, ''))) as hh_id_key,
+      upper(btrim(coalesce(row_value.municipality, ''))) as municipality_key,
+      upper(btrim(coalesce(row_value.barangay, ''))) as barangay_key
+    from pg_catalog.jsonb_to_recordset(coalesce(p_rows, '[]'::jsonb)) as row_value(
+      hh_id text,
+      municipality text,
+      barangay text
+    )
+  ), area_rows as (
+    select distinct changed.municipality_key, changed.barangay_key
+    from changed
+    where changed.municipality_key <> ''
+  )
+  select
+    coalesce((
+      select array_agg(distinct changed.hh_id_key)
+      from changed
+      where changed.hh_id_key <> ''
+    ), '{}'::text[]),
+    coalesce((
+      select jsonb_agg(jsonb_build_object(
+        'municipality_key', area.municipality_key,
+        'barangay_key', area.barangay_key
+      ))
+      from area_rows area
+    ), '[]'::jsonb)
+  into v_hh_ids, v_areas;
+
+  if cardinality(v_hh_ids) > 0 or pg_catalog.jsonb_array_length(v_areas) > 0 then
+    perform private.ipcr_refresh_grantee_case_manager_mapping_subset(
+      v_period_id,
+      v_hh_ids,
+      v_areas
+    );
+  end if;
+end;
+$$;
+
+
+ALTER FUNCTION "private"."ipcr_sync_changed_grantee_rows"("p_rows" "jsonb") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "private"."ipcr_sync_changed_household_assignments"("p_rows" "jsonb") RETURNS "void"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+declare
+  v_period_id uuid;
+  v_hh_ids text[] := '{}'::text[];
+  v_areas jsonb := '[]'::jsonb;
+begin
+  if pg_catalog.current_setting(
+    'private.skip_grantee_case_manager_mapping_refresh', true
+  ) = 'on' then
+    return;
+  end if;
+
+  select period.id
+  into v_period_id
+  from public.ipcr_period period
+  order by
+    case when period.status = 'published' then 0 else 1 end,
+    period.starts_on desc,
+    period.created_at desc
+  limit 1;
+
+  if v_period_id is null then
+    return;
+  end if;
+
+  with changed as materialized (
+    select
+      upper(btrim(coalesce(row_value.hh_id, ''))) as hh_id_key,
+      upper(btrim(coalesce(row_value.municipality, ''))) as municipality_key,
+      upper(btrim(coalesce(row_value.barangay, ''))) as barangay_key
+    from pg_catalog.jsonb_to_recordset(coalesce(p_rows, '[]'::jsonb)) as row_value(
+      period_id uuid,
+      hh_id text,
+      municipality text,
+      barangay text,
+      effective_to timestamptz
+    )
+    where row_value.period_id = v_period_id
+  ), area_rows as (
+    select distinct changed.municipality_key, changed.barangay_key
+    from changed
+    where changed.municipality_key <> ''
+  )
+  select
+    coalesce((
+      select array_agg(distinct changed.hh_id_key)
+      from changed
+      where changed.hh_id_key <> ''
+    ), '{}'::text[]),
+    coalesce((
+      select jsonb_agg(jsonb_build_object(
+        'municipality_key', area.municipality_key,
+        'barangay_key', area.barangay_key
+      ))
+      from area_rows area
+    ), '[]'::jsonb)
+  into v_hh_ids, v_areas;
+
+  if cardinality(v_hh_ids) > 0 or pg_catalog.jsonb_array_length(v_areas) > 0 then
+    perform private.ipcr_refresh_grantee_case_manager_mapping_subset(
+      v_period_id,
+      v_hh_ids,
+      v_areas
+    );
+  end if;
+end;
+$$;
+
+
+ALTER FUNCTION "private"."ipcr_sync_changed_household_assignments"("p_rows" "jsonb") OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "private"."ipcr_sync_grantee_case_manager_mapping_trigger"() RETURNS "trigger"
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO ''
     AS $$
 begin
+  if pg_catalog.current_setting(
+    'private.skip_grantee_case_manager_mapping_refresh',
+    true
+  ) = 'on' then
+    return null;
+  end if;
+
   perform private.ipcr_refresh_grantee_case_manager_mapping();
   perform private.ipcr_mark_current_unassigned_grantee_mapping();
   return null;
@@ -2760,6 +3660,223 @@ $$;
 
 
 ALTER FUNCTION "public"."grantee_status_counts"("p_cluster" integer) OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."import_grantee_list_chunk"("p_rows" "jsonb") RETURNS bigint
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    SET "statement_timeout" TO '45s'
+    AS $$
+declare
+  v_actor_id uuid := (select auth.uid());
+  v_period_id uuid;
+  v_hh_ids text[] := '{}'::text[];
+  v_changed_areas jsonb := '[]'::jsonb;
+  v_upserted bigint := 0;
+begin
+  if v_actor_id is null or not (
+    exists (
+      select 1
+      from public.staff staff_member
+      where staff_member.user_id = v_actor_id
+        and staff_member.role in ('admin', 'provincial', 'swoIII', 'swoII')
+        and staff_member.is_active = true
+    )
+    or exists (
+      select 1
+      from auth.users account
+      where account.id = v_actor_id
+        and account.raw_app_meta_data ->> 'role' = 'admin'
+    )
+  ) then
+    raise exception 'Only Grantee List editors can import household records.'
+      using errcode = '42501';
+  end if;
+
+  if p_rows is null or pg_catalog.jsonb_typeof(p_rows) <> 'array' then
+    raise exception 'p_rows must be a JSON array'
+      using errcode = '22023';
+  end if;
+
+  if pg_catalog.jsonb_array_length(p_rows) = 0 then
+    return 0;
+  end if;
+
+  select period.id
+  into v_period_id
+  from public.ipcr_period period
+  order by
+    case when period.status = 'published' then 0 else 1 end,
+    period.starts_on desc,
+    period.created_at desc
+  limit 1;
+
+  with incoming as materialized (
+    select
+      upper(btrim(import_row.hh_id)) as hh_id_key,
+      upper(btrim(coalesce(import_row.municipality, ''))) as municipality_key,
+      upper(btrim(coalesce(import_row.barangay, ''))) as barangay_key,
+      upper(btrim(coalesce(import_row.set_group, ''))) as set_group_key
+    from pg_catalog.jsonb_to_recordset(p_rows) as import_row(
+      hh_id text,
+      municipality text,
+      barangay text,
+      set_group text
+    )
+    where nullif(btrim(import_row.hh_id), '') is not null
+  ), exact_hhids as materialized (
+    select assignment_rule.scope_value_key as hh_id_key
+    from public.ipcr_assignment_rule assignment_rule
+    where assignment_rule.period_id = v_period_id
+      and assignment_rule.scope_type = 'hhid'
+      and assignment_rule.status in ('draft', 'published')
+
+    union
+
+    select upper(btrim(assignment.hh_id)) as hh_id_key
+    from public.ipcr_household_assignment assignment
+    where assignment.period_id = v_period_id
+      and assignment.effective_to is null
+  ), changed_exact as materialized (
+    select
+      incoming.hh_id_key,
+      incoming.municipality_key as new_municipality_key,
+      incoming.barangay_key as new_barangay_key,
+      upper(btrim(coalesce(grantee.municipality, ''))) as old_municipality_key,
+      upper(btrim(coalesce(grantee.barangay, ''))) as old_barangay_key
+    from incoming
+    join exact_hhids exact on exact.hh_id_key = incoming.hh_id_key
+    left join public.grantee_list grantee
+      on upper(btrim(grantee.hh_id)) = incoming.hh_id_key
+    where grantee.id is null
+       or upper(btrim(coalesce(grantee.municipality, ''))) is distinct from incoming.municipality_key
+       or upper(btrim(coalesce(grantee.barangay, ''))) is distinct from incoming.barangay_key
+       or upper(btrim(coalesce(grantee.set_group, ''))) is distinct from incoming.set_group_key
+  ), changed_area_rows as (
+    select changed.old_municipality_key as municipality_key,
+      changed.old_barangay_key as barangay_key
+    from changed_exact changed
+    where changed.old_municipality_key <> ''
+
+    union
+
+    select changed.new_municipality_key, changed.new_barangay_key
+    from changed_exact changed
+    where changed.new_municipality_key <> ''
+  )
+  select
+    coalesce((select array_agg(distinct incoming.hh_id_key) from incoming), '{}'::text[]),
+    coalesce((
+      select jsonb_agg(jsonb_build_object(
+        'municipality_key', area.municipality_key,
+        'barangay_key', area.barangay_key
+      ))
+      from changed_area_rows area
+    ), '[]'::jsonb)
+  into v_hh_ids, v_changed_areas;
+
+  perform pg_catalog.set_config(
+    'private.skip_grantee_case_manager_mapping_refresh',
+    'on',
+    true
+  );
+
+  insert into public.grantee_list (
+    hh_id,
+    grantee_name,
+    municipality,
+    barangay,
+    status,
+    region,
+    province,
+    entry_id,
+    set_group,
+    birthday,
+    sex,
+    ip_affiliation,
+    mothers_maiden_name,
+    date_tagged_v2,
+    date_tagged_v3,
+    registered,
+    l3_consolidated
+  )
+  select
+    btrim(import_row.hh_id),
+    import_row.grantee_name,
+    import_row.municipality,
+    import_row.barangay,
+    import_row.status,
+    import_row.region,
+    import_row.province,
+    import_row.entry_id,
+    import_row.set_group,
+    import_row.birthday,
+    import_row.sex,
+    import_row.ip_affiliation,
+    import_row.mothers_maiden_name,
+    import_row.date_tagged_v2,
+    import_row.date_tagged_v3,
+    import_row.registered,
+    import_row.l3_consolidated
+  from pg_catalog.jsonb_to_recordset(p_rows) as import_row(
+    hh_id text,
+    grantee_name text,
+    municipality text,
+    barangay text,
+    status text,
+    region text,
+    province text,
+    entry_id text,
+    set_group text,
+    birthday date,
+    sex text,
+    ip_affiliation text,
+    mothers_maiden_name text,
+    date_tagged_v2 timestamptz,
+    date_tagged_v3 timestamptz,
+    registered text,
+    l3_consolidated text
+  )
+  where nullif(btrim(import_row.hh_id), '') is not null
+  on conflict (hh_id) do update
+  set
+    grantee_name = excluded.grantee_name,
+    municipality = excluded.municipality,
+    barangay = excluded.barangay,
+    status = excluded.status,
+    region = excluded.region,
+    province = excluded.province,
+    entry_id = excluded.entry_id,
+    set_group = excluded.set_group,
+    birthday = excluded.birthday,
+    sex = excluded.sex,
+    ip_affiliation = excluded.ip_affiliation,
+    mothers_maiden_name = excluded.mothers_maiden_name,
+    date_tagged_v2 = excluded.date_tagged_v2,
+    date_tagged_v3 = excluded.date_tagged_v3,
+    registered = excluded.registered,
+    l3_consolidated = excluded.l3_consolidated;
+
+  get diagnostics v_upserted = row_count;
+
+  if v_period_id is not null and cardinality(v_hh_ids) > 0 then
+    perform private.ipcr_refresh_grantee_case_manager_mapping_subset(
+      v_period_id,
+      v_hh_ids,
+      v_changed_areas
+    );
+  end if;
+
+  return v_upserted;
+end;
+$$;
+
+
+ALTER FUNCTION "public"."import_grantee_list_chunk"("p_rows" "jsonb") OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."import_grantee_list_chunk"("p_rows" "jsonb") IS 'Upserts one Grantee List batch and refreshes Case Manager ownership only for that batch.';
+
 
 
 CREATE OR REPLACE FUNCTION "public"."ipcr_admin_caseload_summary"("p_period_id" "uuid") RETURNS TABLE("user_id" "uuid", "staff_name" "text", "staff_role" "text", "municipality" "text", "caseload_households" bigint, "monitoring_entries" bigint)
@@ -5136,6 +6253,48 @@ $$;
 ALTER FUNCTION "public"."refresh_grantee_lhf"() OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."refresh_grantee_list_case_manager_mapping"() RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    SET "statement_timeout" TO '5min'
+    AS $$
+declare
+  v_role text;
+  v_mapping jsonb;
+  v_unassigned bigint := 0;
+begin
+  select staff_member.role
+  into v_role
+  from public.staff staff_member
+  where staff_member.user_id = (select auth.uid());
+
+  if v_role is null or v_role not in ('admin', 'provincial', 'swoIII', 'swoII') then
+    raise exception 'Only IPC editors can refresh Grantee List Case Manager mappings.'
+      using errcode = '42501';
+  end if;
+
+  perform pg_catalog.set_config(
+    'private.skip_grantee_case_manager_mapping_refresh',
+    'on',
+    true
+  );
+
+  v_mapping := private.ipcr_refresh_grantee_case_manager_mapping();
+  v_unassigned := private.ipcr_mark_current_unassigned_grantee_mapping();
+
+  return coalesce(v_mapping, '{}'::jsonb)
+    || pg_catalog.jsonb_build_object('unassigned_marked', v_unassigned);
+end;
+$$;
+
+
+ALTER FUNCTION "public"."refresh_grantee_list_case_manager_mapping"() OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."refresh_grantee_list_case_manager_mapping"() IS 'Runs one editor-authorized Case Manager ownership refresh after all Grantee List import batches are stored.';
+
+
+
 CREATE OR REPLACE FUNCTION "public"."restore_concurrence_row"("archive_id" "uuid") RETURNS "uuid"
     LANGUAGE "sql"
     SET "search_path" TO ''
@@ -5592,9 +6751,139 @@ $_$;
 
 ALTER FUNCTION "public"."sync_monitor_grantee_profiles"("p_monitor_id" "uuid") OWNER TO "postgres";
 
+
+CREATE OR REPLACE FUNCTION "public"."sync_updated_grantees_to_monitors"() RETURNS "trigger"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    SET "statement_timeout" TO '45s'
+    AS $_$
+begin
+  with changed_grantees as materialized (
+    select new_row.*
+    from new_grantees new_row
+    join old_grantees old_row on old_row.id = new_row.id
+    where old_row.hh_id is distinct from new_row.hh_id
+       or old_row.municipality is distinct from new_row.municipality
+       or old_row.barangay is distinct from new_row.barangay
+       or old_row.status is distinct from new_row.status
+  )
+  update public.monitor_row monitor_row
+  set
+    municipality = grantee.municipality,
+    data = monitor_row.data
+      || case when monitor.municipality_key is not null
+              then jsonb_build_object(monitor.municipality_key, coalesce(grantee.municipality, ''))
+              else '{}'::jsonb end
+      || case when monitor.barangay_key is not null
+              then jsonb_build_object(monitor.barangay_key, coalesce(grantee.barangay, ''))
+              else '{}'::jsonb end
+      || case when monitor.client_status_key is not null
+                    and monitor.client_status_key <> mapping.beneficiary_key
+              then jsonb_build_object(monitor.client_status_key, coalesce(grantee.status, ''))
+              else '{}'::jsonb end
+      || case when monitor.slug = 'for-concurrence'
+              then jsonb_build_object('__concurrence_grantee_match', true)
+              else '{}'::jsonb end,
+    values = case
+      when monitor.slug = 'for-concurrence'
+           and concurrence.field_key is not null
+           and coalesce(monitor_row.data ->> '__concurrence_is_returning', 'false') <> 'true'
+        then jsonb_set(
+          coalesce(monitor_row.values, '{}'::jsonb),
+          array[concurrence.field_key],
+          to_jsonb(concurrence.yes_value),
+          true
+        )
+      else monitor_row.values
+    end
+  from public.monitor monitor
+  cross join lateral (
+    select coalesce(
+      monitor.beneficiary_key,
+      case when monitor.slug = 'for-concurrence' then 'Listahanan ID' end
+    ) as beneficiary_key
+  ) mapping
+  left join lateral (
+    select
+      field ->> 'key' as field_key,
+      coalesce((
+        select option_value
+        from jsonb_array_elements_text(coalesce(field -> 'options', '[]'::jsonb)) option_value
+        where option_value ~* '^(yes|true|concurred)$'
+        limit 1
+      ), 'Yes') as yes_value
+    from jsonb_array_elements(coalesce(monitor.fields, '[]'::jsonb)) field
+    where regexp_replace(
+      lower(coalesce(field ->> 'label', '')),
+      '[^a-z0-9]+',
+      ' ',
+      'g'
+    ) = 'is concurred'
+    limit 1
+  ) concurrence on true,
+  changed_grantees grantee
+  where monitor_row.monitor_id = monitor.id
+    and mapping.beneficiary_key is not null
+    and grantee.hh_id = monitor_row.beneficiary_hh_id
+    and (
+      monitor_row.municipality is distinct from grantee.municipality
+      or (
+        monitor.municipality_key is not null
+        and (monitor_row.data ->> monitor.municipality_key)
+          is distinct from coalesce(grantee.municipality, '')
+      )
+      or (
+        monitor.barangay_key is not null
+        and (monitor_row.data ->> monitor.barangay_key)
+          is distinct from coalesce(grantee.barangay, '')
+      )
+      or (
+        monitor.client_status_key is not null
+        and monitor.client_status_key <> mapping.beneficiary_key
+        and (monitor_row.data ->> monitor.client_status_key)
+          is distinct from coalesce(grantee.status, '')
+      )
+      or (
+        monitor.slug = 'for-concurrence'
+        and (monitor_row.data ->> '__concurrence_grantee_match') is distinct from 'true'
+      )
+      or (
+        monitor.slug = 'for-concurrence'
+        and concurrence.field_key is not null
+        and coalesce(monitor_row.data ->> '__concurrence_is_returning', 'false') <> 'true'
+        and (monitor_row.values ->> concurrence.field_key)
+          is distinct from concurrence.yes_value
+      )
+    );
+
+  return null;
+end;
+$_$;
+
+
+ALTER FUNCTION "public"."sync_updated_grantees_to_monitors"() OWNER TO "postgres";
+
 SET default_tablespace = '';
 
 SET default_table_access_method = "heap";
+
+
+CREATE TABLE IF NOT EXISTS "private"."ipcr_case_manager_area_owner" (
+    "period_id" "uuid" NOT NULL,
+    "municipality_key" "text" NOT NULL,
+    "barangay_key" "text" NOT NULL,
+    "set_group_key" "text" DEFAULT ''::"text" NOT NULL,
+    "responsible_cm_user_id" "uuid" NOT NULL,
+    "assignment_scope" "text" NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL
+);
+
+
+ALTER TABLE "private"."ipcr_case_manager_area_owner" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "private"."ipcr_case_manager_area_owner" IS 'Cached unambiguous owners inferred from current household-level IPCR assignments.';
+
 
 
 CREATE TABLE IF NOT EXISTS "public"."auth_throttle" (
@@ -6765,6 +8054,11 @@ CREATE OR REPLACE VIEW "public"."v_grantee_list" WITH ("security_invoker"='on') 
 ALTER VIEW "public"."v_grantee_list" OWNER TO "postgres";
 
 
+ALTER TABLE ONLY "private"."ipcr_case_manager_area_owner"
+    ADD CONSTRAINT "ipcr_case_manager_area_owner_pkey" PRIMARY KEY ("period_id", "municipality_key", "barangay_key", "set_group_key");
+
+
+
 ALTER TABLE ONLY "public"."auth_throttle"
     ADD CONSTRAINT "auth_throttle_pkey" PRIMARY KEY ("id");
 
@@ -7454,7 +8748,15 @@ CREATE OR REPLACE TRIGGER "case_list_set_updated_at" BEFORE UPDATE ON "public"."
 
 
 
-CREATE OR REPLACE TRIGGER "grantee_list_sync_case_manager_mapping" AFTER INSERT OR DELETE OR UPDATE OF "hh_id", "municipality", "barangay", "set_group" ON "public"."grantee_list" FOR EACH STATEMENT EXECUTE FUNCTION "private"."ipcr_sync_grantee_case_manager_mapping_trigger"();
+CREATE OR REPLACE TRIGGER "grantee_list_delete_sync_case_manager_mapping" AFTER DELETE ON "public"."grantee_list" REFERENCING OLD TABLE AS "old_grantees" FOR EACH STATEMENT EXECUTE FUNCTION "private"."ipcr_grantee_delete_mapping_trigger"();
+
+
+
+CREATE OR REPLACE TRIGGER "grantee_list_insert_sync_case_manager_mapping" AFTER INSERT ON "public"."grantee_list" REFERENCING NEW TABLE AS "new_grantees" FOR EACH STATEMENT EXECUTE FUNCTION "private"."ipcr_grantee_insert_mapping_trigger"();
+
+
+
+CREATE OR REPLACE TRIGGER "grantee_list_update_sync_case_manager_mapping" AFTER UPDATE ON "public"."grantee_list" REFERENCING OLD TABLE AS "old_grantees" NEW TABLE AS "new_grantees" FOR EACH STATEMENT EXECUTE FUNCTION "private"."ipcr_grantee_update_mapping_trigger"();
 
 
 
@@ -7462,7 +8764,7 @@ CREATE OR REPLACE TRIGGER "grantee_monitor_sync_insert" AFTER INSERT ON "public"
 
 
 
-CREATE OR REPLACE TRIGGER "grantee_monitor_sync_update" AFTER UPDATE ON "public"."grantee_list" REFERENCING NEW TABLE AS "changed_grantees" FOR EACH STATEMENT EXECUTE FUNCTION "public"."sync_changed_grantees_to_monitors"();
+CREATE OR REPLACE TRIGGER "grantee_monitor_sync_update" AFTER UPDATE ON "public"."grantee_list" REFERENCING OLD TABLE AS "old_grantees" NEW TABLE AS "new_grantees" FOR EACH STATEMENT EXECUTE FUNCTION "public"."sync_updated_grantees_to_monitors"();
 
 
 
@@ -7470,7 +8772,15 @@ CREATE OR REPLACE TRIGGER "ipcr_alert_set_updated_at" BEFORE UPDATE ON "public".
 
 
 
-CREATE OR REPLACE TRIGGER "ipcr_assignment_rule_sync_grantee_mapping" AFTER INSERT OR DELETE OR UPDATE ON "public"."ipcr_assignment_rule" FOR EACH STATEMENT EXECUTE FUNCTION "private"."ipcr_sync_grantee_case_manager_mapping_trigger"();
+CREATE OR REPLACE TRIGGER "ipcr_assignment_rule_delete_sync_grantee_mapping" AFTER DELETE ON "public"."ipcr_assignment_rule" REFERENCING OLD TABLE AS "old_rules" FOR EACH STATEMENT EXECUTE FUNCTION "private"."ipcr_assignment_rule_delete_mapping_trigger"();
+
+
+
+CREATE OR REPLACE TRIGGER "ipcr_assignment_rule_insert_sync_grantee_mapping" AFTER INSERT ON "public"."ipcr_assignment_rule" REFERENCING NEW TABLE AS "new_rules" FOR EACH STATEMENT EXECUTE FUNCTION "private"."ipcr_assignment_rule_insert_mapping_trigger"();
+
+
+
+CREATE OR REPLACE TRIGGER "ipcr_assignment_rule_update_sync_grantee_mapping" AFTER UPDATE ON "public"."ipcr_assignment_rule" REFERENCING OLD TABLE AS "old_rules" NEW TABLE AS "new_rules" FOR EACH STATEMENT EXECUTE FUNCTION "private"."ipcr_assignment_rule_update_mapping_trigger"();
 
 
 
@@ -7486,7 +8796,15 @@ CREATE OR REPLACE TRIGGER "ipcr_grantee_profile_change" AFTER UPDATE OF "municip
 
 
 
-CREATE OR REPLACE TRIGGER "ipcr_household_assignment_sync_grantee_mapping" AFTER INSERT OR DELETE OR UPDATE ON "public"."ipcr_household_assignment" FOR EACH STATEMENT EXECUTE FUNCTION "private"."ipcr_sync_grantee_case_manager_mapping_trigger"();
+CREATE OR REPLACE TRIGGER "ipcr_household_assignment_delete_sync_grantee_mapping" AFTER DELETE ON "public"."ipcr_household_assignment" REFERENCING OLD TABLE AS "old_assignments" FOR EACH STATEMENT EXECUTE FUNCTION "private"."ipcr_household_assignment_delete_mapping_trigger"();
+
+
+
+CREATE OR REPLACE TRIGGER "ipcr_household_assignment_insert_sync_grantee_mapping" AFTER INSERT ON "public"."ipcr_household_assignment" REFERENCING NEW TABLE AS "new_assignments" FOR EACH STATEMENT EXECUTE FUNCTION "private"."ipcr_household_assignment_insert_mapping_trigger"();
+
+
+
+CREATE OR REPLACE TRIGGER "ipcr_household_assignment_update_sync_grantee_mapping" AFTER UPDATE ON "public"."ipcr_household_assignment" REFERENCING OLD TABLE AS "old_assignments" NEW TABLE AS "new_assignments" FOR EACH STATEMENT EXECUTE FUNCTION "private"."ipcr_household_assignment_update_mapping_trigger"();
 
 
 
@@ -8561,6 +9879,18 @@ REVOKE ALL ON FUNCTION "private"."concurrence_parse_timestamp"("p_value" "text")
 
 
 
+REVOKE ALL ON FUNCTION "private"."ipcr_assignment_rule_delete_mapping_trigger"() FROM PUBLIC;
+
+
+
+REVOKE ALL ON FUNCTION "private"."ipcr_assignment_rule_insert_mapping_trigger"() FROM PUBLIC;
+
+
+
+REVOKE ALL ON FUNCTION "private"."ipcr_assignment_rule_update_mapping_trigger"() FROM PUBLIC;
+
+
+
 REVOKE ALL ON FUNCTION "private"."ipcr_can_edit_monitor_row"("target_hh_id" "text", "target_municipality" "text") FROM PUBLIC;
 GRANT ALL ON FUNCTION "private"."ipcr_can_edit_monitor_row"("target_hh_id" "text", "target_municipality" "text") TO "authenticated";
 GRANT ALL ON FUNCTION "private"."ipcr_can_edit_monitor_row"("target_hh_id" "text", "target_municipality" "text") TO "service_role";
@@ -8586,6 +9916,30 @@ GRANT ALL ON FUNCTION "private"."ipcr_effective_household_assignment"("p_period_
 
 REVOKE ALL ON FUNCTION "private"."ipcr_flag_household_profile_change"() FROM PUBLIC;
 GRANT ALL ON FUNCTION "private"."ipcr_flag_household_profile_change"() TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "private"."ipcr_grantee_delete_mapping_trigger"() FROM PUBLIC;
+
+
+
+REVOKE ALL ON FUNCTION "private"."ipcr_grantee_insert_mapping_trigger"() FROM PUBLIC;
+
+
+
+REVOKE ALL ON FUNCTION "private"."ipcr_grantee_update_mapping_trigger"() FROM PUBLIC;
+
+
+
+REVOKE ALL ON FUNCTION "private"."ipcr_household_assignment_delete_mapping_trigger"() FROM PUBLIC;
+
+
+
+REVOKE ALL ON FUNCTION "private"."ipcr_household_assignment_insert_mapping_trigger"() FROM PUBLIC;
+
+
+
+REVOKE ALL ON FUNCTION "private"."ipcr_household_assignment_update_mapping_trigger"() FROM PUBLIC;
 
 
 
@@ -8616,8 +9970,30 @@ GRANT ALL ON FUNCTION "private"."ipcr_monitor_row_owner"("p_hh_id" "text", "p_mu
 
 
 
+REVOKE ALL ON FUNCTION "private"."ipcr_rebuild_case_manager_area_owners"("p_period_id" "uuid", "p_areas" "jsonb") FROM PUBLIC;
+GRANT ALL ON FUNCTION "private"."ipcr_rebuild_case_manager_area_owners"("p_period_id" "uuid", "p_areas" "jsonb") TO "service_role";
+
+
+
 REVOKE ALL ON FUNCTION "private"."ipcr_refresh_grantee_case_manager_mapping"() FROM PUBLIC;
 GRANT ALL ON FUNCTION "private"."ipcr_refresh_grantee_case_manager_mapping"() TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "private"."ipcr_refresh_grantee_case_manager_mapping_subset"("p_period_id" "uuid", "p_hh_id_keys" "text"[], "p_areas" "jsonb") FROM PUBLIC;
+GRANT ALL ON FUNCTION "private"."ipcr_refresh_grantee_case_manager_mapping_subset"("p_period_id" "uuid", "p_hh_id_keys" "text"[], "p_areas" "jsonb") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "private"."ipcr_sync_changed_assignment_rules"("p_rows" "jsonb") FROM PUBLIC;
+
+
+
+REVOKE ALL ON FUNCTION "private"."ipcr_sync_changed_grantee_rows"("p_rows" "jsonb") FROM PUBLIC;
+
+
+
+REVOKE ALL ON FUNCTION "private"."ipcr_sync_changed_household_assignments"("p_rows" "jsonb") FROM PUBLIC;
 
 
 
@@ -8836,6 +10212,12 @@ GRANT ALL ON FUNCTION "public"."gtrgm_union"("internal", "internal") TO "service
 
 
 
+REVOKE ALL ON FUNCTION "public"."import_grantee_list_chunk"("p_rows" "jsonb") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."import_grantee_list_chunk"("p_rows" "jsonb") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."import_grantee_list_chunk"("p_rows" "jsonb") TO "service_role";
+
+
+
 REVOKE ALL ON FUNCTION "public"."ipcr_admin_caseload_summary"("p_period_id" "uuid") FROM PUBLIC;
 GRANT ALL ON FUNCTION "public"."ipcr_admin_caseload_summary"("p_period_id" "uuid") TO "service_role";
 
@@ -8967,6 +10349,12 @@ GRANT ALL ON FUNCTION "public"."refresh_grantee_lhf"() TO "service_role";
 
 
 
+REVOKE ALL ON FUNCTION "public"."refresh_grantee_list_case_manager_mapping"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."refresh_grantee_list_case_manager_mapping"() TO "authenticated";
+GRANT ALL ON FUNCTION "public"."refresh_grantee_list_case_manager_mapping"() TO "service_role";
+
+
+
 REVOKE ALL ON FUNCTION "public"."restore_concurrence_row"("archive_id" "uuid") FROM PUBLIC;
 GRANT ALL ON FUNCTION "public"."restore_concurrence_row"("archive_id" "uuid") TO "authenticated";
 GRANT ALL ON FUNCTION "public"."restore_concurrence_row"("archive_id" "uuid") TO "service_role";
@@ -9092,6 +10480,11 @@ GRANT ALL ON FUNCTION "public"."sync_changed_grantees_to_monitors"() TO "service
 REVOKE ALL ON FUNCTION "public"."sync_monitor_grantee_profiles"("p_monitor_id" "uuid") FROM PUBLIC;
 GRANT ALL ON FUNCTION "public"."sync_monitor_grantee_profiles"("p_monitor_id" "uuid") TO "authenticated";
 GRANT ALL ON FUNCTION "public"."sync_monitor_grantee_profiles"("p_monitor_id" "uuid") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."sync_updated_grantees_to_monitors"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."sync_updated_grantees_to_monitors"() TO "service_role";
 
 
 
