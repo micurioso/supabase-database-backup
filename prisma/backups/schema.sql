@@ -776,82 +776,81 @@ COMMENT ON FUNCTION "private"."ipcr_monitor_filtered_count"("p_monitor_id" "uuid
 
 
 
-CREATE OR REPLACE FUNCTION "private"."ipcr_monitor_kpi_matches"("p_kpi" "jsonb", "p_data" "jsonb", "p_values" "jsonb") RETURNS boolean
+CREATE OR REPLACE FUNCTION "private"."ipcr_monitor_kpi_condition_matches"("p_match" "jsonb", "p_data" "jsonb", "p_values" "jsonb") RETURNS boolean
     LANGUAGE "sql" IMMUTABLE PARALLEL SAFE
-    SET "search_path" TO 'pg_catalog'
     AS $$
-  select case coalesce(p_kpi #>> '{match,op}', '')
+  select case coalesce(p_match ->> 'op', '')
     when 'set' then btrim(coalesce(
       case
-        when coalesce(p_kpi #>> '{match,columnKey}', '') <> ''
-          then p_data ->> (p_kpi #>> '{match,columnKey}')
-        else p_values ->> (p_kpi #>> '{match,fieldKey}')
+        when coalesce(p_match ->> 'columnKey', '') <> ''
+          then p_data ->> (p_match ->> 'columnKey')
+        else p_values ->> (p_match ->> 'fieldKey')
       end,
       ''
     )) <> ''
     when 'notset' then btrim(coalesce(
       case
-        when coalesce(p_kpi #>> '{match,columnKey}', '') <> ''
-          then p_data ->> (p_kpi #>> '{match,columnKey}')
-        else p_values ->> (p_kpi #>> '{match,fieldKey}')
+        when coalesce(p_match ->> 'columnKey', '') <> ''
+          then p_data ->> (p_match ->> 'columnKey')
+        else p_values ->> (p_match ->> 'fieldKey')
       end,
       ''
     )) = ''
     when 'eq' then
       case
-        when jsonb_typeof(p_kpi #> '{match,values}') = 'array'
-          and jsonb_array_length(p_kpi #> '{match,values}') > 0
-        then (p_kpi #> '{match,values}') ? coalesce(
+        when jsonb_typeof(p_match -> 'values') = 'array'
+          and jsonb_array_length(p_match -> 'values') > 0
+        then (p_match -> 'values') ? coalesce(
           case
-            when coalesce(p_kpi #>> '{match,columnKey}', '') <> ''
-              then p_data ->> (p_kpi #>> '{match,columnKey}')
-            else p_values ->> (p_kpi #>> '{match,fieldKey}')
+            when coalesce(p_match ->> 'columnKey', '') <> ''
+              then p_data ->> (p_match ->> 'columnKey')
+            else p_values ->> (p_match ->> 'fieldKey')
           end,
           ''
         )
         else coalesce(
           case
-            when coalesce(p_kpi #>> '{match,columnKey}', '') <> ''
-              then p_data ->> (p_kpi #>> '{match,columnKey}')
-            else p_values ->> (p_kpi #>> '{match,fieldKey}')
+            when coalesce(p_match ->> 'columnKey', '') <> ''
+              then p_data ->> (p_match ->> 'columnKey')
+            else p_values ->> (p_match ->> 'fieldKey')
           end,
           ''
-        ) = coalesce(p_kpi #>> '{match,value}', '')
+        ) = coalesce(p_match ->> 'value', '')
       end
     when 'neq' then
       case
-        when jsonb_typeof(p_kpi #> '{match,values}') = 'array'
-          and jsonb_array_length(p_kpi #> '{match,values}') > 0
-        then not ((p_kpi #> '{match,values}') ? coalesce(
+        when jsonb_typeof(p_match -> 'values') = 'array'
+          and jsonb_array_length(p_match -> 'values') > 0
+        then not ((p_match -> 'values') ? coalesce(
           case
-            when coalesce(p_kpi #>> '{match,columnKey}', '') <> ''
-              then p_data ->> (p_kpi #>> '{match,columnKey}')
-            else p_values ->> (p_kpi #>> '{match,fieldKey}')
+            when coalesce(p_match ->> 'columnKey', '') <> ''
+              then p_data ->> (p_match ->> 'columnKey')
+            else p_values ->> (p_match ->> 'fieldKey')
           end,
           ''
         ))
         else coalesce(
           case
-            when coalesce(p_kpi #>> '{match,columnKey}', '') <> ''
-              then p_data ->> (p_kpi #>> '{match,columnKey}')
-            else p_values ->> (p_kpi #>> '{match,fieldKey}')
+            when coalesce(p_match ->> 'columnKey', '') <> ''
+              then p_data ->> (p_match ->> 'columnKey')
+            else p_values ->> (p_match ->> 'fieldKey')
           end,
           ''
-        ) <> coalesce(p_kpi #>> '{match,value}', '')
+        ) <> coalesce(p_match ->> 'value', '')
       end
     when 'true' then coalesce(
       case
-        when coalesce(p_kpi #>> '{match,columnKey}', '') <> ''
-          then p_data ->> (p_kpi #>> '{match,columnKey}')
-        else p_values ->> (p_kpi #>> '{match,fieldKey}')
+        when coalesce(p_match ->> 'columnKey', '') <> ''
+          then p_data ->> (p_match ->> 'columnKey')
+        else p_values ->> (p_match ->> 'fieldKey')
       end,
       ''
     ) = 'true'
     when 'false' then coalesce(
       case
-        when coalesce(p_kpi #>> '{match,columnKey}', '') <> ''
-          then p_data ->> (p_kpi #>> '{match,columnKey}')
-        else p_values ->> (p_kpi #>> '{match,fieldKey}')
+        when coalesce(p_match ->> 'columnKey', '') <> ''
+          then p_data ->> (p_match ->> 'columnKey')
+        else p_values ->> (p_match ->> 'fieldKey')
       end,
       ''
     ) <> 'true'
@@ -860,10 +859,64 @@ CREATE OR REPLACE FUNCTION "private"."ipcr_monitor_kpi_matches"("p_kpi" "jsonb",
 $$;
 
 
+ALTER FUNCTION "private"."ipcr_monitor_kpi_condition_matches"("p_match" "jsonb", "p_data" "jsonb", "p_values" "jsonb") OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "private"."ipcr_monitor_kpi_condition_matches"("p_match" "jsonb", "p_data" "jsonb", "p_values" "jsonb") IS 'Evaluates one monitoring KPI condition against imported and encoded JSON values.';
+
+
+
+CREATE OR REPLACE FUNCTION "private"."ipcr_monitor_kpi_matches"("p_kpi" "jsonb", "p_data" "jsonb", "p_values" "jsonb") RETURNS boolean
+    LANGUAGE "sql" IMMUTABLE PARALLEL SAFE
+    AS $$
+  select case
+    when jsonb_typeof(p_kpi -> 'additionalMatches') = 'array'
+      and jsonb_array_length(p_kpi -> 'additionalMatches') > 0
+    then case coalesce(p_kpi ->> 'matchMode', 'all')
+      when 'any' then
+        private.ipcr_monitor_kpi_condition_matches(
+          coalesce(p_kpi -> 'match', '{}'::jsonb),
+          p_data,
+          p_values
+        )
+        or exists (
+          select 1
+          from jsonb_array_elements(p_kpi -> 'additionalMatches') additional(match)
+          where private.ipcr_monitor_kpi_condition_matches(
+            additional.match,
+            p_data,
+            p_values
+          )
+        )
+      else
+        private.ipcr_monitor_kpi_condition_matches(
+          coalesce(p_kpi -> 'match', '{}'::jsonb),
+          p_data,
+          p_values
+        )
+        and not exists (
+          select 1
+          from jsonb_array_elements(p_kpi -> 'additionalMatches') additional(match)
+          where not private.ipcr_monitor_kpi_condition_matches(
+            additional.match,
+            p_data,
+            p_values
+          )
+        )
+      end
+    else private.ipcr_monitor_kpi_condition_matches(
+      coalesce(p_kpi -> 'match', '{}'::jsonb),
+      p_data,
+      p_values
+    )
+  end;
+$$;
+
+
 ALTER FUNCTION "private"."ipcr_monitor_kpi_matches"("p_kpi" "jsonb", "p_data" "jsonb", "p_values" "jsonb") OWNER TO "postgres";
 
 
-COMMENT ON FUNCTION "private"."ipcr_monitor_kpi_matches"("p_kpi" "jsonb", "p_data" "jsonb", "p_values" "jsonb") IS 'Evaluates a monitoring KPI with an inlineable immutable JSON expression.';
+COMMENT ON FUNCTION "private"."ipcr_monitor_kpi_matches"("p_kpi" "jsonb", "p_data" "jsonb", "p_values" "jsonb") IS 'Evaluates legacy single-condition and compound all/any monitoring KPI rules.';
 
 
 
@@ -9956,6 +10009,11 @@ GRANT ALL ON FUNCTION "private"."ipcr_mark_current_unassigned_grantee_mapping"()
 
 REVOKE ALL ON FUNCTION "private"."ipcr_monitor_filtered_count"("p_monitor_id" "uuid", "p_municipalities" "text"[], "p_case_manager_user_id" "uuid", "p_search" "text", "p_search_columns" "text"[], "p_barangay_column" "text", "p_barangays" "text"[], "p_value_filters" "jsonb", "p_data_filters" "jsonb", "p_mode" "text", "p_kpi" "jsonb", "p_enabled_kpis" "jsonb") FROM PUBLIC;
 GRANT ALL ON FUNCTION "private"."ipcr_monitor_filtered_count"("p_monitor_id" "uuid", "p_municipalities" "text"[], "p_case_manager_user_id" "uuid", "p_search" "text", "p_search_columns" "text"[], "p_barangay_column" "text", "p_barangays" "text"[], "p_value_filters" "jsonb", "p_data_filters" "jsonb", "p_mode" "text", "p_kpi" "jsonb", "p_enabled_kpis" "jsonb") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "private"."ipcr_monitor_kpi_condition_matches"("p_match" "jsonb", "p_data" "jsonb", "p_values" "jsonb") FROM PUBLIC;
+GRANT ALL ON FUNCTION "private"."ipcr_monitor_kpi_condition_matches"("p_match" "jsonb", "p_data" "jsonb", "p_values" "jsonb") TO "service_role";
 
 
 
